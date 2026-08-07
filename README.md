@@ -1,45 +1,282 @@
-# Robo Data Scientist - AutoML Platform
+# Robo Data Scientist — AutoML Platform
 
-## Overview
+[![CI](https://github.com/ChetanKumor/AutoML/actions/workflows/ci.yml/badge.svg)](https://github.com/ChetanKumor/AutoML/actions/workflows/ci.yml)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![Code style: ruff](https://img.shields.io/badge/code%20style-ruff-000000.svg)](https://github.com/astral-sh/ruff)
 
-This project is an automated machine learning platform that detects dataset type and trains multiple models to identify the best-performing solution.
+Point it at a tabular dataset and it will profile the target, build a
+preprocessing pipeline that matches your column types, train and rank a family
+of models, and hand back the winner as a self-contained artifact you can serve
+predictions from.
 
-## Problem Statement
+Available as a Streamlit app for exploration and as a CLI for reproducible,
+scriptable training.
 
-Building machine learning models requires expertise in preprocessing, model selection, and tuning, making it difficult for beginners.
+---
 
-## Solution
+## Contents
 
-The platform automates the ML pipeline by identifying dataset type, training multiple models, and ranking them based on performance.
+- [Why this exists](#why-this-exists)
+- [Quickstart](#quickstart)
+- [How it works](#how-it-works)
+- [Project structure](#project-structure)
+- [Configuration](#configuration)
+- [Development](#development)
+- [Design decisions](#design-decisions)
+- [Limitations](#limitations)
+- [Roadmap](#roadmap)
+- [License](#license)
 
-## Tech Stack
+---
 
-* Python
-* Scikit-learn
-* Pandas, NumPy
-* Matplotlib
-* Flask / Streamlit
+## Why this exists
 
-## Features
+Getting a baseline model out of a new tabular dataset is mostly repetitive:
+infer whether the problem is classification or regression, clean the columns,
+impute, encode, scale, split, try the usual estimators, tune them a little, and
+compare. This project automates that loop while keeping the parts that are easy
+to get subtly wrong — most importantly, **fitting every transformer on training
+data only** so the reported metrics mean something.
 
-* Automatic dataset analysis
-* Classification and regression support
-* Model training and comparison
-* Cross-validation
-* Performance leaderboard
+## Quickstart
 
-## Output
+### Install
 
-* Accuracy and performance metrics
-* Model comparison results
-* Best model selection
+```bash
+git clone https://github.com/ChetanKumor/AutoML.git
+cd AutoML
 
-## Future Work
+python -m venv .venv
+source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-* Add deep learning support
-* Build a more interactive UI
-* Enable cloud-based training
+pip install -r requirements.txt
+```
 
-## Author
+Python 3.10 or newer is required.
 
-Chetan Kumor
+### Train from the command line
+
+```bash
+python train.py --data data/heart-disease.csv --target target
+```
+
+This writes two timestamped files into `saved_models/`: a `model_*.pkl`
+artifact and a `leaderboard_*.csv`.
+
+```
+usage: train.py [-h] --data DATA [--target TARGET] [--output-dir OUTPUT_DIR]
+                [--task-type {classification,regression}]
+```
+
+`--target` is optional; it is inferred from the data when omitted. `--task-type`
+overrides the inferred task if the heuristic guesses wrong.
+
+### Run the web app
+
+```bash
+streamlit run app.py
+```
+
+Upload a CSV or Excel file, confirm the suggested target column, and train.
+The app shows the ranked leaderboard, lets you download the winning artifact,
+and can score a second uploaded file against any saved model.
+
+### Predict from Python
+
+```python
+import pandas as pd
+from utils.predict import make_prediction
+
+df = pd.read_csv("new_records.csv")
+predictions = make_prediction(df, "saved_models/model_RandomForest_20250101_120000.pkl")
+print(predictions["Predicted_Target"])
+```
+
+`make_prediction` takes **raw** input — the artifact carries its own fitted
+preprocessor, so you do not reproduce the feature engineering by hand.
+
+## How it works
+
+```
+Dataset (CSV / Excel)
+        │
+        ▼
+┌───────────────────────┐
+│ Target preparation    │  clean currency/percent strings, label-encode
+│ utils/data_utils      │  categorical targets, infer classification
+│ auto_target_identifier│  vs. regression
+└───────────┬───────────┘
+            ▼
+┌───────────────────────┐
+│ TRAIN / TEST SPLIT    │  ◄── happens BEFORE any transformer is fitted
+│ stratified when the   │
+│ class balance allows  │
+└───────────┬───────────┘
+            │
+   ┌────────┴────────┐
+   ▼                 ▼
+train fold        test fold
+   │                 │
+   │  fit_transform  │  transform only
+   ▼                 ▼
+┌─────────────────────────────────────────┐
+│ Preprocessing pipeline                  │
+│ utils/feature_engineer                  │
+│                                         │
+│  1. FeatureTypeCleaner   "$1,200" → 1200│
+│  2. RareCategoryGrouper  rare → "Other" │
+│  3. OutlierRemover       cap at median  │
+│  4. FeatureSelector      drop low-var,  │
+│                          correlated     │
+│  5. ColumnTransformer                   │
+│       numeric → impute, de-skew, scale  │
+│       categorical → impute, one-hot     │
+└───────────┬─────────────────────────────┘
+            ▼
+┌───────────────────────┐
+│ Model search          │  GridSearchCV over each candidate,
+│ utils/model_trainer   │  cross-validated on the training fold
+└───────────┬───────────┘
+            ▼
+┌───────────────────────┐
+│ Evaluation on the     │  ranked leaderboard
+│ held-out test fold    │
+└───────────┬───────────┘
+            ▼
+┌───────────────────────┐
+│ ModelArtifact         │  model + preprocessor + encoder + metadata
+│ utils/model_artifact  │  one file, one contract
+└───────────────────────┘
+```
+
+### Candidate models
+
+**Classification (10)** — Logistic Regression, Decision Tree, Random Forest,
+K-Nearest Neighbours, Gaussian Naive Bayes, SVM, Gradient Boosting, XGBoost,
+LightGBM, CatBoost. Plus two ensembles built from the models that trained
+successfully: a soft-voting ensemble and a stacking ensemble.
+
+**Regression (9)** — Linear Regression, Decision Tree, Random Forest,
+K-Nearest Neighbours, SVR, Gradient Boosting, XGBoost, LightGBM, CatBoost.
+
+XGBoost, LightGBM and CatBoost are optional at runtime: if one is not
+installed, it is skipped with a warning instead of breaking the run.
+
+### Metrics
+
+| Task | Ranking metric | Also reported |
+| --- | --- | --- |
+| Classification | Accuracy | Precision, Recall, F1 (weighted), confusion matrix |
+| Regression | R² | MSE, RMSE, MAE |
+
+All figures are computed on the held-out test fold, never on training data.
+
+## Project structure
+
+```
+AutoML/
+├── app.py                        Streamlit UI
+├── train.py                      CLI training entrypoint
+├── utils/
+│   ├── auto_target_identifier.py Target detection, task-type inference
+│   ├── constants.py              Environment-driven configuration
+│   ├── data_utils.py             Dataset loading, target preparation
+│   ├── feature_engineer.py       Custom transformers, pipeline builder
+│   ├── logging_utils.py          Centralised logging
+│   ├── model_artifact.py         Serialization contract
+│   ├── model_trainer.py          Model search, evaluation, leaderboard
+│   └── predict.py                Inference
+├── tests/                        86 tests
+├── notebooks/                    Exploratory analysis
+├── data/                         Sample dataset
+└── .github/workflows/ci.yml      Lint, test, smoke, app-boot
+```
+
+## Configuration
+
+Every path and tunable is read from the environment, so the same code runs
+locally, in CI and in a container.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `AUTOML_MODEL_DIR` | `saved_models` | Where artifacts are written |
+| `AUTOML_ENCODER_DIR` | `saved_encoders` | Where encoders are written |
+| `AUTOML_LOG_DIR` | `logs` | Log file location |
+| `AUTOML_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, ... |
+| `AUTOML_LOG_TO_FILE` | `1` | Set to `0` to log to console only |
+| `AUTOML_MAX_UPLOAD_MB` | `200` | Upload size ceiling |
+| `AUTOML_RANDOM_STATE` | `42` | Global seed |
+| `AUTOML_TEST_SIZE` | `0.2` | Held-out fraction |
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+
+pytest                       # 86 tests
+pytest --cov=utils           # with coverage (currently 82%)
+ruff check . && ruff format --check .
+```
+
+CI runs lint, the test suite on Python 3.10/3.11/3.12, an end-to-end
+train-then-predict smoke test, and a headless Streamlit boot check.
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) before opening a pull request.
+
+## Design decisions
+
+**The split happens before the fit.** Fitting imputers, scalers, power
+transforms, outlier detectors or feature selectors on the full dataset leaks
+information from the evaluation fold and inflates every metric. `build_preprocessor`
+therefore returns an *unfitted* pipeline, and `train_models` splits first and
+fits only on the training fold. Two tests pin this behaviour.
+
+**One serialization contract.** The model, its preprocessor, the label encoder
+and the task type travel together in a single `ModelArtifact`. An earlier
+version persisted a bare tuple whose shape the training and inference code each
+hard-coded separately; they drifted, and every prediction crashed. Loading a
+payload that is not a `ModelArtifact` now fails with an explicit message.
+
+**Column routing is resolved at fit time.** The `ColumnTransformer` selects
+columns by dtype rather than from a captured list, because `FeatureSelector`
+runs before it and may drop columns.
+
+**Optional heavy dependencies degrade gracefully.** A missing gradient-boosting
+backend removes one candidate from the search rather than breaking the import.
+
+## Limitations
+
+Worth knowing before you rely on it:
+
+- **Tabular data only.** No text, image, time-series or multi-label support.
+  Time-ordered data will be shuffled by the random split.
+- **In-memory.** The dataset must fit in RAM; there is no out-of-core path.
+- **Small hyperparameter grids.** `GridSearchCV` sweeps a deliberately narrow
+  grid to keep runs quick. Expect a strong baseline, not a tuned champion.
+- **Accuracy ranks classifiers.** On heavily imbalanced data this favours the
+  majority class; read the per-class metrics rather than the ranking alone.
+- **Target inference is heuristic.** It distinguishes discrete codes from
+  continuous quantities using cardinality and magnitude, which is a guess.
+  Override it with `--target` and `--task-type`.
+- **Artifacts are pickles.** Only load artifacts you produced or trust; pickle
+  executes code on load.
+- **No authentication.** The Streamlit app is unauthenticated — do not expose
+  it publicly with sensitive data.
+- **No experiment tracking yet.** Runs write a leaderboard CSV; there is no
+  MLflow or W&B integration.
+
+## Roadmap
+
+- [ ] Experiment tracking (MLflow) with run comparison
+- [ ] Randomised and Bayesian search as alternatives to grid search
+- [ ] SHAP-based feature importance in the leaderboard
+- [ ] Regression ensembles (voting/stacking, as classification already has)
+- [ ] Class-imbalance handling: class weights, resampling, PR-AUC ranking
+- [ ] FastAPI inference service and a Dockerfile
+- [ ] Time-series aware splitting
+- [ ] Data drift detection against the training distribution
+
+## License
+
+[MIT](LICENSE) © Chetan Kumor
