@@ -6,10 +6,13 @@ from datetime import datetime
 
 import streamlit as st
 import pandas as pd
-import numpy as np  # for np.nan
 
-from utils.data_utils import load_dataset, analyze_and_prepare_target
-from utils.feature_engineer import preprocess_data
+from utils.auto_target_identifier import detect_task_type
+from utils.data_utils import (
+    analyze_and_prepare_target,
+    detect_target_column,
+    load_dataset,
+)
 from utils.model_trainer import train_models
 from utils.predict import make_prediction
 from utils.model_artifact import ModelArtifact
@@ -36,15 +39,12 @@ if file:
     st.subheader("📊 Raw Dataset Preview")
     st.dataframe(df.head())
 
-    # Auto-detect target column or let user select
-    from utils.data_utils import detect_target_column as auto_detect # Aliasing to avoid conflict
-    initial_target_col_suggestion = auto_detect(df.copy()) # Pass a copy to avoid side effects
-
-    # Find the index of the suggested target column
+    # Suggest a target column, but let the user override it.
+    suggested_target = detect_target_column(df)
     try:
-        default_index = list(df.columns).index(initial_target_col_suggestion)
+        default_index = list(df.columns).index(suggested_target)
     except ValueError:
-        default_index = len(df.columns) - 1 if len(df.columns) > 0 else 0
+        default_index = max(len(df.columns) - 1, 0)
 
 
     target_col = st.sidebar.selectbox(
@@ -57,105 +57,48 @@ if file:
     if st.sidebar.button("🚀 Train Models"):
         with st.spinner("Training models... This may take a while! ⏳"):
             try:
-                # Prepare data for training
-                X_train_raw, y_train_processed, label_encoder = analyze_and_prepare_target(df.copy(), target_col)
+                # Separate features from the (cleaned/encoded) target.
+                X_raw, y, label_encoder = analyze_and_prepare_target(
+                    df.copy(), target_col
+                )
+                task_type = detect_task_type(pd.Series(y))
 
-                # Get task type using detect_task_type from auto_target_identifier
-                from utils.auto_target_identifier import detect_task_type
-                task_type = detect_task_type(pd.Series(y_train_processed)) # Pass a Series
+                st.info(f"Detected task type: **{task_type}**. Training models...")
 
-                # Preprocess features using the pipeline
-                X_processed_for_training, fitted_preprocessor_pipeline = preprocess_data(X_train_raw)
+                # train_models splits BEFORE fitting the preprocessor, so the
+                # held-out fold never influences imputation, scaling, outlier
+                # detection or feature selection.
+                result = train_models(X_raw, pd.Series(y), task_type)
 
-                # Combine processed features and target for model training
-                processed_df_for_training = pd.DataFrame(X_processed_for_training)
-
-                # Ensure column names are consistent if the preprocessor provides them
-                try:
-                    feature_names = fitted_preprocessor_pipeline.named_steps['column_transform'].get_feature_names_out()
-                    processed_df_for_training.columns = feature_names
-                except AttributeError:
-                    logger.warning("ColumnTransformer does not support get_feature_names_out directly or it's not implemented for all steps. Using generic feature names.")
-                    processed_df_for_training.columns = [f"feature_{i}" for i in range(X_processed_for_training.shape[1])]
-
-
-                processed_df_for_training[target_col] = y_train_processed
-
-                st.info("Training models... This might take a few moments.")
-                # Pass task_type to train_models
-                results, best_model_name, best_model_obj = train_models(processed_df_for_training.copy(), target_col, task_type)
-
-                # Determine the primary metric for the leaderboard based on task type
-                primary_metric_key = "Accuracy" if task_type == "classification" else "R2 Score"
-
-                # Leaderboard
                 st.subheader("🏆 Model Leaderboard")
-                leaderboard_data = []
-                for name, metrics_data in results.items():
-                    leaderboard_entry = {
-                        "Model": name,
-                    }
-                    
-                    # Add primary metric from the top-level of metrics_data
-                    if primary_metric_key in metrics_data and not pd.isna(metrics_data[primary_metric_key]):
-                        leaderboard_entry[primary_metric_key] = round(metrics_data[primary_metric_key], 4)
-                    else:
-                        leaderboard_entry[primary_metric_key] = np.nan # Use NaN if primary metric is missing or NaN
-
-                    # Add other relevant details from metrics_data['Details']
-                    for detail_key, detail_value in metrics_data.get('Details', {}).items():
-                        if isinstance(detail_value, (int, float)):
-                            leaderboard_entry[detail_key] = round(detail_value, 4)
-                        elif detail_key == "Confusion Matrix":
-                            leaderboard_entry[detail_key] = str(detail_value) # Convert list to string for display
-                        elif detail_key == "Error": # Include error message for failed models
-                            leaderboard_entry[detail_key] = detail_value
-                            
-                    leaderboard_data.append(leaderboard_entry)
-
-                # Always create and display the DataFrame.
-                leaderboard_df = pd.DataFrame(leaderboard_data)
-
-                if not leaderboard_df.empty:
-                    # Sort by the primary metric if the column exists and has non-NaN values
-                    if primary_metric_key in leaderboard_df.columns and not leaderboard_df[primary_metric_key].isnull().all():
-                        ascending_sort = False # For R2 Score, higher is better, so descending values
-                        if primary_metric_key == "Accuracy": # For accuracy, higher is better
-                            ascending_sort = False
-                        
-                        # Sort, putting NaNs at the end
-                        leaderboard_df = leaderboard_df.sort_values(
-                            by=primary_metric_key, 
-                            ascending=ascending_sort, 
-                            na_position='last'
-                        ).reset_index(drop=True)
-                    st.dataframe(leaderboard_df)
+                if not result.leaderboard.empty:
+                    st.dataframe(result.leaderboard, use_container_width=True)
                 else:
-                    st.info("No models were successfully trained or evaluated to display metrics.")
-
+                    st.info("No models were successfully trained or evaluated.")
 
                 # Conditional saving and download button
-                if best_model_obj is not None:
+                if result.best_estimator is not None:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    model_filename = f"model_{best_model_name}_{timestamp}.pkl"
+                    model_filename = f"model_{result.best_model_name}_{timestamp}.pkl"
                     model_path = os.path.join(MODEL_DIR, model_filename)
 
                     # Persist a single, self-describing artifact so training and
                     # inference always agree on the serialized contract.
                     ModelArtifact(
-                        model=best_model_obj,
-                        preprocessor=fitted_preprocessor_pipeline,
+                        model=result.best_estimator,
+                        preprocessor=result.preprocessor,
                         task_type=task_type,
                         target_column=target_col,
                         label_encoder=label_encoder,
-                        model_name=best_model_name,
-                        feature_names=[
-                            c for c in processed_df_for_training.columns if c != target_col
-                        ],
-                        metrics=results.get(best_model_name, {}).get("Details", {}),
+                        model_name=result.best_model_name,
+                        feature_names=result.feature_names,
+                        metrics=result.best_metrics,
                     ).save(model_path)
 
-                    st.success(f"Training complete! Best model '{best_model_name}' saved to '{model_path}'")
+                    st.success(
+                        f"Training complete! Best model "
+                        f"'{result.best_model_name}' saved to '{model_path}'"
+                    )
 
                     with open(model_path, "rb") as file_to_download:
                         btn = st.download_button(

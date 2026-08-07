@@ -17,15 +17,39 @@ from sklearn import set_config
 set_config(transform_output="pandas")
 
 
-class FeatureTypeCleaner(BaseEstimator, TransformerMixin):
+class _ColumnPreservingMixin:
+    """Shared ``get_feature_names_out`` for transformers that keep the schema.
+
+    These transformers rewrite *values* but never add or drop columns, so their
+    output names equal their input names. scikit-learn's pandas-output wrapper
+    calls ``get_feature_names_out()`` with **no arguments**, so the column names
+    seen during ``fit`` must be recorded rather than demanded from the caller.
+    """
+
+    def _record_input_features(self, X: pd.DataFrame) -> None:
+        self.feature_names_in_ = np.asarray(X.columns, dtype=object)
+
+    def get_feature_names_out(self, input_features=None):
+        if input_features is not None:
+            return np.asarray(input_features, dtype=object)
+        if hasattr(self, "feature_names_in_"):
+            return self.feature_names_in_
+        raise ValueError(
+            f"{type(self).__name__} must be fitted before calling "
+            "get_feature_names_out(), or input_features must be provided."
+        )
+
+
+class FeatureTypeCleaner(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
     """
     Cleans features by converting currency/percentage strings to numeric.
     Handles 'object' type columns that contain numeric-like strings.
     """
-    def __init__(self):
-        pass
 
     def fit(self, X, y=None):
+        if not isinstance(X, pd.DataFrame):
+            X = pd.DataFrame(X)
+        self._record_input_features(X)
         return self
 
     def transform(self, X):
@@ -42,15 +66,8 @@ class FeatureTypeCleaner(BaseEstimator, TransformerMixin):
                 X[col] = pd.to_numeric(X[col], errors='coerce') # Convert to numeric
         return X
 
-    def get_feature_names_out(self, input_features=None):
-        # This transformer does not add or remove columns, only modifies values/types.
-        # So, output feature names are the same as input feature names.
-        if input_features is None:
-            raise ValueError("input_features must be provided to get_feature_names_out for FeatureTypeCleaner.")
-        return input_features
 
-
-class OutlierRemover(BaseEstimator, TransformerMixin):
+class OutlierRemover(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
     """
     Handles outliers using IsolationForest from numeric columns by capping them
     with the column's median, instead of removing rows.
@@ -66,8 +83,10 @@ class OutlierRemover(BaseEstimator, TransformerMixin):
         # Ensure X is a DataFrame
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
+        self._record_input_features(X)
+        self.detectors, self.medians = {}, {}
 
-        for col in X.select_dtypes(include=['float64', 'int64']).columns:
+        for col in X.select_dtypes(include=np.number).columns:
             # Fit IsolationForest only on the current numeric column
             # Reshape to 2D array as IsolationForest expects
             self.detectors[col] = IsolationForest(
@@ -87,24 +106,26 @@ class OutlierRemover(BaseEstimator, TransformerMixin):
 
         # Apply outlier detection and capping/imputation
         for col, detector in self.detectors.items():
-            if col in X_transformed.columns: # Ensure column exists in current dataframe
-                # Predict outliers (1 for inlier, -1 for outlier)
-                outlier_preds = detector.predict(X_transformed[[col]])
+            if col not in X_transformed.columns:
+                continue
+            # Predict outliers (1 for inlier, -1 for outlier)
+            outlier_mask = detector.predict(X_transformed[[col]]) == -1
+            if not outlier_mask.any():
+                continue
 
-                # Replace outliers with the stored median value of that column
-                # This ensures the number of rows remains constant
-                X_transformed.loc[outlier_preds == -1, col] = self.medians.get(col, X_transformed[col].median())
+            replacement = self.medians.get(col, X_transformed[col].median())
+            # The median of an integer column can be fractional; widen to float
+            # rather than letting pandas raise on the narrowing assignment.
+            if pd.api.types.is_integer_dtype(X_transformed[col]) and replacement != int(
+                replacement
+            ):
+                X_transformed[col] = X_transformed[col].astype("float64")
+            # Replace outliers with the column median, keeping the row count fixed.
+            X_transformed.loc[outlier_mask, col] = replacement
         return X_transformed
 
-    def get_feature_names_out(self, input_features=None):
-        # This transformer modifies values but does not add or remove columns/rows.
-        # So, output feature names are the same as input feature names.
-        if input_features is None:
-            raise ValueError("input_features must be provided to get_feature_names_out for OutlierRemover.")
-        return input_features
 
-
-class RareCategoryGrouper(BaseEstimator, TransformerMixin):
+class RareCategoryGrouper(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
     """
     Groups rare categories in object/category/bool columns into an 'Other' category.
     Rare categories are those with a frequency below a specified threshold.
@@ -117,12 +138,14 @@ class RareCategoryGrouper(BaseEstimator, TransformerMixin):
         # Ensure X is a DataFrame
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
+        self._record_input_features(X)
+        self.mappings = {}
 
         for col in X.select_dtypes(include=['object', 'category', 'bool']).columns:
             # Calculate value frequencies
             freq = X[col].value_counts(normalize=True)
             # Identify rare labels (frequency below threshold)
-            rare_labels = freq[freq < self.threshold].index
+            rare_labels = set(freq[freq < self.threshold].index)
             self.mappings[col] = rare_labels # Store rare labels for transformation
         return self
 
@@ -136,13 +159,6 @@ class RareCategoryGrouper(BaseEstimator, TransformerMixin):
             # Replace rare labels with 'Other'
             X_transformed[col] = X_transformed[col].apply(lambda x: 'Other' if x in rares else x)
         return X_transformed
-
-    def get_feature_names_out(self, input_features=None):
-        # This transformer does not add or remove columns, only modifies values.
-        # So, output feature names are the same as input feature names.
-        if input_features is None:
-            raise ValueError("input_features must be provided to get_feature_names_out for RareCategoryGrouper.")
-        return input_features
 
 
 class FeatureSelector(BaseEstimator, TransformerMixin):
@@ -163,7 +179,7 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         # Create a temporary selector to find columns with variance above threshold
         temp_selector = VarianceThreshold(self.var_threshold)
         # Fit on numeric columns only
-        numeric_cols = X.select_dtypes(include=['int64', 'float64']).columns
+        numeric_cols = X.select_dtypes(include=np.number).columns
         if not numeric_cols.empty:
             temp_selector.fit(X[numeric_cols])
             # Get names of columns retained after variance thresholding
@@ -183,10 +199,11 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         # Combine selected numeric and original non-numeric columns
         # All original columns that are not numeric are kept as is,
         # then numeric columns after variance and correlation selection are added.
-        initial_non_numeric_cols = X.select_dtypes(exclude=['int64', 'float64']).columns.tolist()
+        initial_non_numeric_cols = X.select_dtypes(exclude=np.number).columns.tolist()
         final_numeric_cols = [col for col in retained_by_variance if col not in to_drop_corr]
 
         self.selected_columns = initial_non_numeric_cols + final_numeric_cols
+        self._fitted = True
         return self
 
     def transform(self, X):
@@ -199,22 +216,16 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
         return X[self.selected_columns].copy()
 
     def get_feature_names_out(self, input_features=None):
-        # This transformer explicitly selects a subset of columns during fit.
-        # It must return the names of the columns it has selected.
-        if hasattr(self, 'selected_columns') and self.selected_columns:
-            return self.selected_columns
-        elif input_features is not None:
-            # Fallback if not fitted, which might happen during pipeline introspection.
-            # This is not ideal as it doesn't reflect actual selection.
-            # A more robust solution might involve raising an error or returning a placeholder
-            # if the selector hasn't been fitted yet and thus self.selected_columns is empty.
-            # However, for the context of being used within a fitted pipeline, selected_columns will exist.
-            return input_features # This might be incorrect if called before fit
-        else:
-            raise ValueError("FeatureSelector must be fitted or input_features must be provided to get_feature_names_out.")
+        # This transformer selects a subset of columns during fit, so the
+        # selection recorded at fit time is authoritative.
+        if not hasattr(self, "_fitted"):
+            raise ValueError(
+                "FeatureSelector must be fitted before calling get_feature_names_out()."
+            )
+        return np.asarray(self.selected_columns, dtype=object)
 
 
-class SkewnessCorrector(BaseEstimator, TransformerMixin):
+class SkewnessCorrector(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
     """
     Applies PowerTransformer (Yeo-Johnson) to highly skewed numeric columns.
     """
@@ -225,10 +236,13 @@ class SkewnessCorrector(BaseEstimator, TransformerMixin):
         # Ensure X is a DataFrame
         if not isinstance(X, pd.DataFrame):
             X = pd.DataFrame(X)
+        self._record_input_features(X)
+        self.transformers = {}
 
-        for col in X.select_dtypes(include=['float64', 'int64']).columns:
+        for col in X.select_dtypes(include=np.number).columns:
             # Check for skewness (absolute skewness > 1 is a common heuristic)
-            if X[col].skew() is not np.nan and abs(X[col].skew()) > 1:
+            skew = X[col].skew()
+            if pd.notna(skew) and abs(skew) > 1:
                 transformer = PowerTransformer(method='yeo-johnson')
                 # Fit the transformer on the column (reshaped to 2D)
                 transformer.fit(X[[col]])
@@ -245,13 +259,6 @@ class SkewnessCorrector(BaseEstimator, TransformerMixin):
             # Apply the fitted transformer to the column
             X_transformed[col] = transformer.transform(X_transformed[[col]])
         return X_transformed
-
-    def get_feature_names_out(self, input_features=None):
-        # This transformer does not add or remove columns, only modifies values.
-        # So, output feature names are the same as input feature names.
-        if input_features is None:
-            raise ValueError("input_features must be provided to get_feature_names_out for SkewnessCorrector.")
-        return input_features
 
 
 class PreprocessorBuilder:
@@ -344,19 +351,19 @@ class PreprocessorBuilder:
         return X_processed, pipeline
 
 
-# Function to be called from app.py or other modules
-def preprocess_data(X: pd.DataFrame):
-    """
-    Convenience function to preprocess data using the PreprocessorBuilder.
+def build_preprocessor(X: pd.DataFrame) -> Pipeline:
+    """Build an **unfitted** preprocessing pipeline shaped for ``X``.
+
+    Only the *structure* of the pipeline is derived from ``X`` (which columns
+    are numeric vs. categorical). No statistics are learned here, so callers are
+    responsible for calling ``fit`` on the training fold alone. Keeping build
+    and fit separate is what allows the trainer to split before fitting and
+    thereby avoid leaking the evaluation fold into the transformers.
 
     Args:
-        X (pd.DataFrame): The input features DataFrame.
+        X: A representative feature frame used for column-type inference.
 
     Returns:
-        Tuple[pd.DataFrame, Pipeline]: A tuple containing:
-            - X_processed (pd.DataFrame): The transformed feature DataFrame.
-            - preprocessor (Pipeline): The fitted preprocessing pipeline object.
+        An unfitted :class:`~sklearn.pipeline.Pipeline`.
     """
-    builder = PreprocessorBuilder()
-    X_processed, preprocessor = builder.fit_transform(X)
-    return X_processed, preprocessor
+    return PreprocessorBuilder().build_pipeline(X)

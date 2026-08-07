@@ -1,326 +1,405 @@
-# utils/model_trainer.py
+"""Model search: train a family of estimators and rank them on a held-out set.
 
-import pandas as pd
+The public entry point is :func:`train_models`, which takes **raw** features and
+targets. It performs the train/test split *before* fitting any transformer, so
+the preprocessing pipeline never observes the evaluation fold. This is the
+critical guarantee that keeps reported metrics honest.
+"""
+
+from __future__ import annotations
+
 import warnings
-import numpy as np # Import numpy for sqrt
-from sklearn.model_selection import train_test_split, GridSearchCV, StratifiedKFold, KFold
-from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score, confusion_matrix,
-    r2_score, mean_squared_error, mean_absolute_error
-)
-from sklearn.ensemble import (
-    RandomForestClassifier, GradientBoostingClassifier, VotingClassifier, StackingClassifier,
-    RandomForestRegressor, GradientBoostingRegressor
-)
-from sklearn.linear_model import LogisticRegression, LinearRegression
-from sklearn.svm import SVC, SVR
-from sklearn.naive_bayes import GaussianNB
-from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
-from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
-from xgboost import XGBClassifier, XGBRegressor
-from lightgbm import LGBMClassifier, LGBMRegressor
-from catboost import CatBoostClassifier, CatBoostRegressor
-from utils.auto_target_identifier import detect_task_type # Import task type detector
-from utils.logging_utils import get_logger # Import get_logger for consistent logging
+from dataclasses import dataclass, field
+from typing import Any, Optional
 
-logger = get_logger() # Initialize logger
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import (
+    GradientBoostingClassifier,
+    GradientBoostingRegressor,
+    RandomForestClassifier,
+    RandomForestRegressor,
+    StackingClassifier,
+    VotingClassifier,
+)
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.metrics import (
+    accuracy_score,
+    confusion_matrix,
+    f1_score,
+    mean_absolute_error,
+    mean_squared_error,
+    precision_score,
+    r2_score,
+    recall_score,
+)
+from sklearn.model_selection import GridSearchCV, KFold, StratifiedKFold, train_test_split
+from sklearn.naive_bayes import GaussianNB
+from sklearn.neighbors import KNeighborsClassifier, KNeighborsRegressor
+from sklearn.pipeline import Pipeline
+from sklearn.svm import SVC, SVR
+from sklearn.tree import DecisionTreeClassifier, DecisionTreeRegressor
+
+from utils.constants import DEFAULT_RANDOM_STATE, DEFAULT_TEST_SIZE
+from utils.feature_engineer import build_preprocessor
+from utils.logging_utils import get_logger
+from utils.model_artifact import CLASSIFICATION, REGRESSION
+
+logger = get_logger()
 
 warnings.filterwarnings("ignore")
 
-def evaluate_model(model, X_test, y_test, task_type: str):
+#: Metric used to rank models, per task type.
+PRIMARY_METRIC = {CLASSIFICATION: "Accuracy", REGRESSION: "R2 Score"}
+
+
+def _lazy_boosters(task_type: str) -> dict[str, Any]:
+    """Import optional gradient-boosting libraries, skipping any that are absent.
+
+    xgboost/lightgbm/catboost are heavy, platform-sensitive dependencies. A
+    missing one should degrade the model search gracefully rather than take the
+    whole application down at import time.
     """
-    Evaluates a model based on its task type (classification or regression).
+    models: dict[str, Any] = {}
+    is_clf = task_type == CLASSIFICATION
 
-    Args:
-        model: The trained model.
-        X_test: Test features.
-        y_test: True test labels/values.
-        task_type (str): 'classification' or 'regression'.
+    try:
+        from xgboost import XGBClassifier, XGBRegressor
 
-    Returns:
-        dict: A dictionary of evaluation metrics.
-    """
-    y_pred = model.predict(X_test)
+        models["XGBoost"] = (
+            XGBClassifier(eval_metric="logloss", random_state=DEFAULT_RANDOM_STATE)
+            if is_clf
+            else XGBRegressor(random_state=DEFAULT_RANDOM_STATE)
+        )
+    except ImportError:  # pragma: no cover - depends on environment
+        logger.warning("xgboost not installed; skipping XGBoost.")
 
-    if task_type == 'classification':
-        # For classification, use average='weighted' for precision, recall, f1-score
-        # to handle multi-class problems gracefully.
-        return {
-            "Accuracy": accuracy_score(y_test, y_pred),
-            "Precision": precision_score(y_test, y_pred, average='weighted', zero_division=0),
-            "Recall": recall_score(y_test, y_pred, average='weighted', zero_division=0),
-            "F1 Score": f1_score(y_test, y_pred, average='weighted', zero_division=0),
-            "Confusion Matrix": confusion_matrix(y_test, y_pred).tolist()
-        }
-    elif task_type == 'regression':
-        mse = mean_squared_error(y_test, y_pred)
-        rmse = np.sqrt(mse) # Calculate RMSE manually for broader compatibility
-        return {
-            "R2 Score": r2_score(y_test, y_pred),
-            "Mean Squared Error": mse,
-            "Root Mean Squared Error": rmse,
-            "Mean Absolute Error": mean_absolute_error(y_test, y_pred)
-            # Add other relevant regression metrics as needed
+    try:
+        from lightgbm import LGBMClassifier, LGBMRegressor
+
+        models["LightGBM"] = (
+            LGBMClassifier(random_state=DEFAULT_RANDOM_STATE, verbose=-1)
+            if is_clf
+            else LGBMRegressor(random_state=DEFAULT_RANDOM_STATE, verbose=-1)
+        )
+    except ImportError:  # pragma: no cover
+        logger.warning("lightgbm not installed; skipping LightGBM.")
+
+    try:
+        from catboost import CatBoostClassifier, CatBoostRegressor
+
+        models["CatBoost"] = (
+            CatBoostClassifier(verbose=0, random_state=DEFAULT_RANDOM_STATE)
+            if is_clf
+            else CatBoostRegressor(verbose=0, random_state=DEFAULT_RANDOM_STATE)
+        )
+    except ImportError:  # pragma: no cover
+        logger.warning("catboost not installed; skipping CatBoost.")
+
+    return models
+
+
+def _base_models(task_type: str) -> dict[str, Any]:
+    """Return the candidate estimators for ``task_type``."""
+    if task_type == CLASSIFICATION:
+        models: dict[str, Any] = {
+            "LogisticRegression": LogisticRegression(
+                max_iter=1000, random_state=DEFAULT_RANDOM_STATE
+            ),
+            "DecisionTree": DecisionTreeClassifier(random_state=DEFAULT_RANDOM_STATE),
+            "RandomForest": RandomForestClassifier(random_state=DEFAULT_RANDOM_STATE),
+            "KNN": KNeighborsClassifier(),
+            "NaiveBayes": GaussianNB(),
+            "SVM": SVC(probability=True, random_state=DEFAULT_RANDOM_STATE),
+            "GradientBoosting": GradientBoostingClassifier(
+                random_state=DEFAULT_RANDOM_STATE
+            ),
         }
     else:
-        raise ValueError(f"Unsupported task type: {task_type}")
+        models = {
+            "LinearRegression": LinearRegression(),
+            "DecisionTree": DecisionTreeRegressor(random_state=DEFAULT_RANDOM_STATE),
+            "RandomForest": RandomForestRegressor(random_state=DEFAULT_RANDOM_STATE),
+            "KNN": KNeighborsRegressor(),
+            "SVR": SVR(),
+            "GradientBoosting": GradientBoostingRegressor(
+                random_state=DEFAULT_RANDOM_STATE
+            ),
+        }
+    models.update(_lazy_boosters(task_type))
+    return models
 
 
-# Define separate parameter grids and base models for classification and regression
-CLASSIFICATION_PARAM_GRIDS = {
-    "LogisticRegression": {"C": [0.01, 0.1, 1], "solver": ['liblinear']},
+#: Hyperparameter grids keyed by model name. Keys are shared between task types
+#: because the underlying estimators expose the same parameter names.
+PARAM_GRIDS: dict[str, dict[str, list]] = {
+    "LogisticRegression": {"C": [0.01, 0.1, 1], "solver": ["liblinear"]},
+    "LinearRegression": {},
     "DecisionTree": {"max_depth": [None, 10], "min_samples_split": [2, 5]},
     "RandomForest": {"n_estimators": [50, 100], "max_depth": [None, 10]},
     "KNN": {"n_neighbors": [3, 5]},
     "NaiveBayes": {},
-    "SVM": {"C": [0.1, 1], "kernel": ['linear', 'rbf']},
+    "SVM": {"C": [0.1, 1], "kernel": ["linear", "rbf"]},
+    "SVR": {"C": [0.1, 1], "kernel": ["linear", "rbf"]},
     "GradientBoosting": {"n_estimators": [50, 100], "learning_rate": [0.01, 0.1]},
-    "XGBoost": {"n_estimators": [50], "learning_rate": [0.01, 0.1], "use_label_encoder": [False], "eval_metric": ['logloss']},
+    "XGBoost": {"n_estimators": [50], "learning_rate": [0.01, 0.1]},
     "LightGBM": {"n_estimators": [50], "learning_rate": [0.01, 0.1]},
-    "CatBoost": {"depth": [4, 6], "learning_rate": [0.01, 0.1], "verbose": [0]},
-}
-
-CLASSIFICATION_BASE_MODELS = {
-    "LogisticRegression": LogisticRegression(max_iter=1000, random_state=42),
-    "DecisionTree": DecisionTreeClassifier(random_state=42),
-    "RandomForest": RandomForestClassifier(random_state=42),
-    "KNN": KNeighborsClassifier(),
-    "NaiveBayes": GaussianNB(),
-    "SVM": SVC(probability=True, random_state=42),
-    "GradientBoosting": GradientBoostingClassifier(random_state=42),
-    "XGBoost": XGBClassifier(use_label_encoder=False, eval_metric='logloss', random_state=42),
-    "LightGBM": LGBMClassifier(random_state=42),
-    "CatBoost": CatBoostClassifier(verbose=0, random_state=42)
-}
-
-REGRESSION_PARAM_GRIDS = {
-    "LinearRegression": {},
-    "DecisionTreeRegressor": {"max_depth": [None, 10], "min_samples_split": [2, 5]},
-    "RandomForestRegressor": {"n_estimators": [50, 100], "max_depth": [None, 10]},
-    "KNeighborsRegressor": {"n_neighbors": [3, 5]},
-    "SVR": {"C": [0.1, 1], "kernel": ['linear', 'rbf']},
-    "GradientBoostingRegressor": {"n_estimators": [50, 100], "learning_rate": [0.01, 0.1]},
-    "XGBoostRegressor": {"n_estimators": [50], "learning_rate": [0.01, 0.1]},
-    "LightGBMRegressor": {"n_estimators": [50], "learning_rate": [0.01, 0.1]},
-    "CatBoostRegressor": {"depth": [4, 6], "learning_rate": [0.01, 0.1], "verbose": [0]},
-}
-
-REGRESSION_BASE_MODELS = {
-    "LinearRegression": LinearRegression(),
-    "DecisionTreeRegressor": DecisionTreeRegressor(random_state=42),
-    "RandomForestRegressor": RandomForestRegressor(random_state=42),
-    "KNeighborsRegressor": KNeighborsRegressor(),
-    "SVR": SVR(),
-    "GradientBoostingRegressor": GradientBoostingRegressor(random_state=42),
-    "XGBoostRegressor": XGBRegressor(random_state=42),
-    "LightGBMRegressor": LGBMRegressor(random_state=42),
-    "CatBoostRegressor": CatBoostRegressor(verbose=0, random_state=42)
+    "CatBoost": {"depth": [4, 6], "learning_rate": [0.01, 0.1]},
 }
 
 
-def train_models(df: pd.DataFrame, target_col: str, task_type: str):
+@dataclass
+class TrainingResult:
+    """Outcome of the model search.
+
+    ``leaderboard`` is ordered best-first. ``best_pipeline`` is a full
+    :class:`~sklearn.pipeline.Pipeline` (preprocessor + estimator) fitted on the
+    training fold, so callers can predict directly from raw input.
     """
-    Trains multiple machine learning models and ensemble models,
-    then evaluates and returns a leaderboard.
+
+    leaderboard: pd.DataFrame
+    best_model_name: Optional[str]
+    best_pipeline: Optional[Pipeline]
+    best_estimator: Optional[Any]
+    preprocessor: Optional[Any]
+    task_type: str = ""
+    feature_names: list[str] = field(default_factory=list)
+    best_metrics: dict[str, Any] = field(default_factory=dict)
+
+
+def evaluate_model(model, X_test, y_test, task_type: str) -> dict[str, Any]:
+    """Compute task-appropriate evaluation metrics on a held-out set."""
+    y_pred = model.predict(X_test)
+
+    if task_type == CLASSIFICATION:
+        return {
+            "Accuracy": accuracy_score(y_test, y_pred),
+            "Precision": precision_score(
+                y_test, y_pred, average="weighted", zero_division=0
+            ),
+            "Recall": recall_score(y_test, y_pred, average="weighted", zero_division=0),
+            "F1 Score": f1_score(y_test, y_pred, average="weighted", zero_division=0),
+            "Confusion Matrix": confusion_matrix(y_test, y_pred).tolist(),
+        }
+    if task_type == REGRESSION:
+        mse = mean_squared_error(y_test, y_pred)
+        return {
+            "R2 Score": r2_score(y_test, y_pred),
+            "Mean Squared Error": mse,
+            "Root Mean Squared Error": float(np.sqrt(mse)),
+            "Mean Absolute Error": mean_absolute_error(y_test, y_pred),
+        }
+    raise ValueError(f"Unsupported task type: {task_type}")
+
+
+def _make_split(X: pd.DataFrame, y: pd.Series, task_type: str):
+    """Split into train/test, stratifying when the class balance permits."""
+    stratify = None
+    if task_type == CLASSIFICATION:
+        min_class_count = y.value_counts().min()
+        if min_class_count >= 2:
+            stratify = y
+            logger.info("Using stratified split (min class count: %d).", min_class_count)
+        else:
+            logger.warning(
+                "Min class count is %d; falling back to a non-stratified split.",
+                min_class_count,
+            )
+    return train_test_split(
+        X,
+        y,
+        test_size=DEFAULT_TEST_SIZE,
+        random_state=DEFAULT_RANDOM_STATE,
+        stratify=stratify,
+    )
+
+
+def _make_cv(y_train: pd.Series, task_type: str):
+    """Build a cross-validation splitter appropriate for the training fold."""
+    if task_type == CLASSIFICATION:
+        min_class_count = int(y_train.value_counts().min())
+        n_splits = max(2, min(3, min_class_count))
+        if min_class_count >= n_splits:
+            return StratifiedKFold(
+                n_splits=n_splits, shuffle=True, random_state=DEFAULT_RANDOM_STATE
+            )
+        return KFold(n_splits=2, shuffle=True, random_state=DEFAULT_RANDOM_STATE)
+    return KFold(n_splits=5, shuffle=True, random_state=DEFAULT_RANDOM_STATE)
+
+
+def train_models(
+    X: pd.DataFrame,
+    y: pd.Series,
+    task_type: str,
+) -> TrainingResult:
+    """Train and rank candidate models on raw features.
+
+    The train/test split happens *before* the preprocessor is fitted, so
+    imputation statistics, scaling parameters, outlier detectors and feature
+    selection are all learned from the training fold alone. Metrics are then
+    computed on a genuinely held-out set.
 
     Args:
-        df (pd.DataFrame): The preprocessed DataFrame including features and target.
-        target_col (str): The name of the target column.
-        task_type (str): 'classification' or 'regression'.
+        X: Raw feature frame (no target column).
+        y: Target values, already cleaned/encoded.
+        task_type: ``"classification"`` or ``"regression"``.
 
     Returns:
-        Tuple[dict, str, object]: A tuple containing:
-            - results (dict): Dictionary of model names and their evaluation metrics and model objects.
-            - best_model_name (str): Name of the best performing model.
-            - best_model_obj (object): The best performing model object.
-            - task_type (str): The determined task type ('classification' or 'regression').
+        A :class:`TrainingResult` with the leaderboard and the best fitted
+        pipeline.
+
+    Raises:
+        ValueError: If ``task_type`` is unsupported.
     """
-    X = df.drop(columns=[target_col])
-    y = df[target_col]
+    if task_type not in (CLASSIFICATION, REGRESSION):
+        raise ValueError(f"Unsupported task type: {task_type}")
 
-    logger.info(f"Detected task type: {task_type.upper()}")
+    y = pd.Series(y).reset_index(drop=True)
+    X = X.reset_index(drop=True)
 
-    # Determine splitting strategy and initial best_score based on task type
-    if task_type == 'classification':
-        base_models_to_use = CLASSIFICATION_BASE_MODELS
-        param_grids_to_use = CLASSIFICATION_PARAM_GRIDS
-        scoring_metric = 'accuracy'
-        
-        # Check minimum class count for stratified split
-        min_class_count = y.value_counts().min()
-        if min_class_count >= 2: # Can stratify if at least 2 samples per class
-            cv_splits = min(3, min_class_count) # Use min(3, actual_min_class_count) for robust CV
-            cv = StratifiedKFold(n_splits=cv_splits, shuffle=True, random_state=42)
-            # Only stratify if min_class_count is sufficient
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
-            logger.info(f"Using stratified train_test_split (min class count: {min_class_count}).")
-        else: # Fallback to non-stratified if not enough data for stratification
-            cv_splits = 2 # Default CV splits even without stratification
-            cv = KFold(n_splits=cv_splits, shuffle=True, random_state=42) # Use KFold for non-stratified
-            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-            logger.warning(f"Not enough data for stratified train_test_split (min class count: {min_class_count}). Using non-stratified split.")
-        
-        best_score = 0.0 # For accuracy, higher is better, start from a sensible low
-    
-    elif task_type == 'regression':
-        base_models_to_use = REGRESSION_BASE_MODELS
-        param_grids_to_use = REGRESSION_PARAM_GRIDS
-        scoring_metric = 'r2' # Common scoring metric for regression
-        cv = KFold(n_splits=5, shuffle=True, random_state=42) # Standard K-Fold for regression
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-        best_score = -float('inf') # For R2 score, higher is better, but can be negative
-    else:
-        raise ValueError(f"Unsupported task type detected: {task_type}")
+    logger.info("Task type: %s | dataset shape: %s", task_type.upper(), X.shape)
 
+    # --- Split FIRST, so the preprocessor never sees the evaluation fold. ---
+    X_train_raw, X_test_raw, y_train, y_test = _make_split(X, y, task_type)
 
-    results = {}
-    best_model_name, best_model_obj = None, None
+    preprocessor = build_preprocessor(X_train_raw)
+    X_train = preprocessor.fit_transform(X_train_raw)
+    X_test = preprocessor.transform(X_test_raw)
+    feature_names = [str(c) for c in getattr(X_train, "columns", [])]
+    logger.info(
+        "Preprocessor fitted on the training fold only "
+        "(train=%s, test=%s, features=%d).",
+        X_train_raw.shape,
+        X_test_raw.shape,
+        len(feature_names) or X_train.shape[1],
+    )
 
+    cv = _make_cv(y_train, task_type)
+    scoring = "accuracy" if task_type == CLASSIFICATION else "r2"
+    primary_metric = PRIMARY_METRIC[task_type]
 
-    logger.info("🔧 Training Models with Hyperparameter Tuning...")
-    for name, model in base_models_to_use.items():
-        logger.info(f"  Training {name}...")
-        params = param_grids_to_use.get(name, {})
-        
-        # Adjust GridSearchCV estimator based on task type
-        if params:
-            grid_search_model = GridSearchCV(model, params, cv=cv, scoring=scoring_metric, n_jobs=-1, error_score='raise')
-        else:
-            grid_search_model = model # If no params, just use the model directly
+    results: dict[str, dict[str, Any]] = {}
+    best_score = -np.inf
+    best_model_name: Optional[str] = None
+    best_estimator: Optional[Any] = None
 
+    logger.info("Training candidate models with hyperparameter search...")
+    for name, model in _base_models(task_type).items():
+        params = PARAM_GRIDS.get(name, {})
         try:
-            grid_search_model.fit(X_train, y_train)
-            trained_model = grid_search_model.best_estimator_ if params else grid_search_model
-            
-            evaluation_metrics = evaluate_model(trained_model, X_test, y_test, task_type)
-            score_key = "Accuracy" if task_type == 'classification' else "R2 Score"
-            # Use .get with a default value to prevent KeyError if metric is missing
-            score = evaluation_metrics.get(score_key, -float('inf') if task_type == 'regression' else 0.0)
-
-
-            results[name] = {
-                score_key: round(score, 4), # Store primary metric at top-level
-                "Model": trained_model,
-                "Details": evaluation_metrics
-            }
-
-            # Update best model only if the score is better
-            if (task_type == 'classification' and score > best_score) or \
-               (task_type == 'regression' and score > best_score):
-                best_score, best_model_name, best_model_obj = score, name, trained_model
-            logger.info(f"  {name} - Primary Metric ({score_key}): {score:.4f}")
-
-        except Exception as e:
-            logger.error(f"  Skipping {name} due to error: {e}", exc_info=True)
-            # Add an entry to results even if training failed, to show in leaderboard
-            results[name] = {
-                ( "Accuracy" if task_type == 'classification' else "R2 Score"): np.nan, # Mark score as NaN
-                "Model": None, # No trained model
-                "Details": {"Error": str(e)} # Store error message
-            }
-
-
-    # Ensemble models (only for classification, extend for regression if needed)
-    if task_type == 'classification':
-        logger.info("\n🤝 Building Ensemble Models (Classification)...")
-
-        # Ensure base models used in ensembles are the trained GridSearchCV estimators
-        # or direct models if no tuning was done, and that they are not None (i.e., didn't fail)
-        rf_model = results.get("RandomForest", {}).get("Model")
-        xgb_model = results.get("XGBoost", {}).get("Model")
-        lr_model = results.get("LogisticRegression", {}).get("Model")
-
-        if rf_model and xgb_model and lr_model:
-            try:
-                voting = VotingClassifier(estimators=[
-                    ('rf', rf_model),
-                    ('xgb', xgb_model),
-                    ('lr', lr_model)
-                ], voting='soft', n_jobs=-1) # Add n_jobs for parallel processing
-                voting.fit(X_train, y_train)
-                evaluation_metrics = evaluate_model(voting, X_test, y_test, task_type)
-                score = evaluation_metrics["Accuracy"]
-                results["VotingEnsemble"] = {
-                    "Accuracy": round(score, 4),
-                    "Model": voting,
-                    "Details": evaluation_metrics
-                }
-                if score > best_score:
-                    best_score, best_model_name, best_model_obj = score, "VotingEnsemble", voting
-                logger.info(f"  VotingEnsemble - Accuracy: {score:.4f}")
-            except Exception as e:
-                logger.error(f"  Skipping VotingEnsemble due to error: {e}", exc_info=True)
-                results["VotingEnsemble"] = {
-                    "Accuracy": np.nan,
-                    "Model": None,
-                    "Details": {"Error": str(e)}
-                }
-        else:
-            logger.info("  Not enough base models available for VotingEnsemble or some failed.")
-            results["VotingEnsemble"] = {
-                "Accuracy": np.nan,
-                "Model": None,
-                "Details": {"Error": "Not enough successful base models to build ensemble."}
-            }
-
-
-        svm_model = results.get("SVM", {}).get("Model")
-        lgbm_model = results.get("LightGBM", {}).get("Model")
-        knn_model = results.get("KNN", {}).get("Model")
-
-        if svm_model and lgbm_model and knn_model:
-            try:
-                stacking = StackingClassifier(
-                    estimators=[
-                        ('svc', svm_model),
-                        ('lgbm', lgbm_model),
-                        ('knn', knn_model)
-                    ],
-                    final_estimator=LogisticRegression(random_state=42),
-                    n_jobs=-1 # Add n_jobs for parallel processing
+            if params:
+                search = GridSearchCV(
+                    model, params, cv=cv, scoring=scoring, n_jobs=-1, error_score="raise"
                 )
-                stacking.fit(X_train, y_train)
-                evaluation_metrics = evaluate_model(stacking, X_test, y_test, task_type)
-                score = evaluation_metrics["Accuracy"]
-                results["StackingEnsemble"] = {
-                    "Accuracy": round(score, 4),
-                    "Model": stacking,
-                    "Details": evaluation_metrics
-                }
+                search.fit(X_train, y_train)
+                trained = search.best_estimator_
+            else:
+                trained = model.fit(X_train, y_train)
+
+            metrics = evaluate_model(trained, X_test, y_test, task_type)
+            score = metrics[primary_metric]
+            results[name] = {"Model": trained, "Details": metrics}
+
+            if score > best_score:
+                best_score, best_model_name, best_estimator = score, name, trained
+            logger.info("  %s -> %s: %.4f", name, primary_metric, score)
+        except Exception as exc:
+            logger.error("  Skipping %s: %s", name, exc, exc_info=True)
+            results[name] = {"Model": None, "Details": {"Error": str(exc)}}
+
+    # --- Ensembles, built from the successfully trained base estimators. ---
+    if task_type == CLASSIFICATION:
+        ensembles = _build_classification_ensembles(results)
+        for ens_name, ensemble in ensembles.items():
+            try:
+                ensemble.fit(X_train, y_train)
+                metrics = evaluate_model(ensemble, X_test, y_test, task_type)
+                score = metrics[primary_metric]
+                results[ens_name] = {"Model": ensemble, "Details": metrics}
                 if score > best_score:
-                    best_score, best_model_name, best_model_obj = score, "StackingEnsemble", stacking
-                logger.info(f"  StackingEnsemble - Accuracy: {score:.4f}")
-            except Exception as e:
-                logger.error(f"  Skipping StackingEnsemble due to error: {e}", exc_info=True)
-                results["StackingEnsemble"] = {
-                    "Accuracy": np.nan,
-                    "Model": None,
-                    "Details": {"Error": str(e)}
-                }
-        else:
-            logger.info("  Not enough base models available for StackingEnsemble or some failed.")
-            results["StackingEnsemble"] = {
-                "Accuracy": np.nan,
-                "Model": None,
-                "Details": {"Error": "Not enough successful base models to build ensemble."}
-            }
-    elif task_type == 'regression':
-        # Add regression ensemble models here if desired, similar to classification
-        logger.info("\n🤝 Ensemble Models for Regression are not yet implemented.")
-        # Add placeholder entries for regression ensembles if they are not implemented,
-        # so they still appear in the leaderboard with NaN values.
-        results["RegressionVotingEnsemble"] = {
-            "R2 Score": np.nan,
-            "Model": None,
-            "Details": {"Error": "Ensemble not implemented for regression."}
-        }
-        results["RegressionStackingEnsemble"] = {
-            "R2 Score": np.nan,
-            "Model": None,
-            "Details": {"Error": "Ensemble not implemented for regression."}
-        }
+                    best_score, best_model_name, best_estimator = (
+                        score,
+                        ens_name,
+                        ensemble,
+                    )
+                logger.info("  %s -> %s: %.4f", ens_name, primary_metric, score)
+            except Exception as exc:
+                logger.error("  Skipping %s: %s", ens_name, exc, exc_info=True)
+                results[ens_name] = {"Model": None, "Details": {"Error": str(exc)}}
+
+    leaderboard = _build_leaderboard(results, primary_metric)
+
+    best_pipeline = None
+    if best_estimator is not None:
+        best_pipeline = Pipeline(
+            [("preprocessor", preprocessor), ("model", best_estimator)]
+        )
+        logger.info("Best model: %s (%s=%.4f)", best_model_name, primary_metric, best_score)
+    else:
+        logger.warning("No model trained successfully.")
+
+    return TrainingResult(
+        leaderboard=leaderboard,
+        best_model_name=best_model_name,
+        best_pipeline=best_pipeline,
+        best_estimator=best_estimator,
+        preprocessor=preprocessor,
+        task_type=task_type,
+        feature_names=feature_names,
+        best_metrics=results.get(best_model_name, {}).get("Details", {})
+        if best_model_name
+        else {},
+    )
 
 
-    logger.info("\n✅ All models trained.")
-    return results, best_model_name, best_model_obj
+def _build_classification_ensembles(results: dict[str, dict]) -> dict[str, Any]:
+    """Assemble voting/stacking ensembles from base models that trained cleanly."""
+    ensembles: dict[str, Any] = {}
 
+    def fitted(*names: str) -> list[tuple[str, Any]]:
+        return [
+            (n.lower(), results[n]["Model"])
+            for n in names
+            if results.get(n, {}).get("Model") is not None
+        ]
+
+    voting_members = fitted("RandomForest", "XGBoost", "LogisticRegression")
+    if len(voting_members) >= 2:
+        ensembles["VotingEnsemble"] = VotingClassifier(
+            estimators=voting_members, voting="soft", n_jobs=-1
+        )
+
+    stacking_members = fitted("SVM", "LightGBM", "KNN")
+    if len(stacking_members) >= 2:
+        ensembles["StackingEnsemble"] = StackingClassifier(
+            estimators=stacking_members,
+            final_estimator=LogisticRegression(random_state=DEFAULT_RANDOM_STATE),
+            n_jobs=-1,
+        )
+
+    return ensembles
+
+
+def _build_leaderboard(results: dict[str, dict], primary_metric: str) -> pd.DataFrame:
+    """Flatten per-model metrics into a leaderboard sorted best-first."""
+    rows = []
+    for name, payload in results.items():
+        details = payload.get("Details", {})
+        row: dict[str, Any] = {"Model": name}
+        for key, value in details.items():
+            if key == "Confusion Matrix":
+                row[key] = str(value)
+            elif isinstance(value, (int, float, np.floating)):
+                row[key] = round(float(value), 4)
+            else:
+                row[key] = value
+        row.setdefault(primary_metric, np.nan)
+        rows.append(row)
+
+    leaderboard = pd.DataFrame(rows)
+    if not leaderboard.empty and primary_metric in leaderboard.columns:
+        # Higher is better for both Accuracy and R2; failures (NaN) sink last.
+        leaderboard = leaderboard.sort_values(
+            by=primary_metric, ascending=False, na_position="last"
+        ).reset_index(drop=True)
+    return leaderboard
