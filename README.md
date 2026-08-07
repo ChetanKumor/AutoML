@@ -190,8 +190,15 @@ installed, it is skipped with a warning instead of breaking the run.
 
 | Task | Ranking metric | Also reported |
 | --- | --- | --- |
-| Classification | Accuracy | Precision, Recall, F1 (weighted), confusion matrix |
+| Classification (balanced) | Accuracy | Balanced accuracy, Precision, Recall, F1 (weighted and macro), confusion matrix |
+| Classification (imbalanced) | Balanced accuracy | as above |
 | Regression | R² | MSE, RMSE, MAE |
+
+When the least-frequent class falls below half the frequency of the most
+common one, ranking switches from accuracy to **balanced accuracy**. Accuracy
+rewards guessing the majority class — on a 95/5 split a model that always
+answers "no" scores 0.95 while learning nothing, where balanced accuracy scores
+it 0.50. `TrainingResult.ranking_metric` records which metric was used.
 
 All figures are computed on the held-out test fold, never on training data.
 
@@ -283,8 +290,9 @@ Worth knowing before you rely on it:
 - **In-memory.** The dataset must fit in RAM; there is no out-of-core path.
 - **Small hyperparameter grids.** `GridSearchCV` sweeps a deliberately narrow
   grid to keep runs quick. Expect a strong baseline, not a tuned champion.
-- **Accuracy ranks classifiers.** On heavily imbalanced data this favours the
-  majority class; read the per-class metrics rather than the ranking alone.
+- **Imbalance is detected, not corrected.** Ranking switches to balanced
+  accuracy on skewed targets, but no class weighting or resampling is applied,
+  so the models themselves are still trained on the skewed distribution.
 - **Target inference is heuristic.** It distinguishes discrete codes from
   continuous quantities using cardinality and magnitude, which is a guess.
   Override it with `--target` and `--task-type`.
@@ -301,7 +309,9 @@ Worth knowing before you rely on it:
 - [ ] Randomised and Bayesian search as alternatives to grid search
 - [ ] SHAP-based feature importance in the leaderboard
 - [ ] Regression ensembles (voting/stacking, as classification already has)
-- [ ] Class-imbalance handling: class weights, resampling, PR-AUC ranking
+- [ ] Class weighting and resampling for imbalanced targets (detection and
+      imbalance-aware ranking are in place; correction is not)
+- [ ] ROC-AUC and PR-AUC in the leaderboard
 - [ ] FastAPI inference service and a Dockerfile
 - [ ] Time-series aware splitting
 - [ ] Data drift detection against the training distribution

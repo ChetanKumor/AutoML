@@ -14,7 +14,7 @@ from utils.data_utils import (
 )
 from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
-from utils.model_trainer import PRIMARY_METRIC, train_models
+from utils.model_trainer import train_models
 from utils.predict import make_prediction
 from utils.validation import (
     DatasetValidationError,
@@ -115,7 +115,7 @@ if file:
                         metrics=result.best_metrics,
                     ).save(str(model_path))
 
-                    metric_name = PRIMARY_METRIC[task_type]
+                    metric_name = result.ranking_metric
                     best_score = result.best_metrics.get(metric_name)
                     st.success(
                         f"Best model: **{result.best_model_name}** "

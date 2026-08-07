@@ -25,6 +25,7 @@ from sklearn.ensemble import (
 from sklearn.linear_model import LinearRegression, LogisticRegression
 from sklearn.metrics import (
     accuracy_score,
+    balanced_accuracy_score,
     confusion_matrix,
     f1_score,
     mean_absolute_error,
@@ -49,8 +50,58 @@ logger = get_logger("trainer")
 
 warnings.filterwarnings("ignore")
 
-#: Metric used to rank models, per task type.
+#: Metric used to rank models, per task type. On imbalanced classification the
+#: ranking switches to balanced accuracy; see :func:`_select_ranking_metric`.
 PRIMARY_METRIC = {CLASSIFICATION: "Accuracy", REGRESSION: "R2 Score"}
+
+#: Below this ratio of least- to most-frequent class, plain accuracy stops being
+#: a trustworthy ranking signal and balanced accuracy is used instead.
+IMBALANCE_THRESHOLD = 0.5
+
+#: scikit-learn scoring names for each ranking metric.
+_SCORING_NAMES = {
+    "Accuracy": "accuracy",
+    "Balanced Accuracy": "balanced_accuracy",
+    "R2 Score": "r2",
+}
+
+
+def _class_balance_ratio(y: pd.Series) -> float:
+    """Ratio of the least-frequent class to the most-frequent one (1.0 = even)."""
+    counts = y.value_counts()
+    if counts.empty or counts.max() == 0:
+        return 1.0
+    return float(counts.min() / counts.max())
+
+
+def _select_ranking_metric(y: pd.Series, task_type: str) -> tuple[str, str]:
+    """Choose the ranking metric and its scikit-learn scoring name.
+
+    Accuracy rewards predicting the majority class on skewed data -- a model
+    that always answers "no" on a 95/5 split scores 0.95 while learning
+    nothing. When the classes are materially imbalanced, rank on balanced
+    accuracy instead, which averages recall across classes.
+
+    Args:
+        y: The target values.
+        task_type: ``"classification"`` or ``"regression"``.
+
+    Returns:
+        A ``(metric_name, sklearn_scoring_name)`` pair.
+    """
+    metric = PRIMARY_METRIC[task_type]
+    if task_type == CLASSIFICATION:
+        ratio = _class_balance_ratio(y)
+        if ratio < IMBALANCE_THRESHOLD:
+            metric = "Balanced Accuracy"
+            logger.info(
+                "Class balance ratio %.3f is below %.2f; ranking on %s "
+                "instead of accuracy.",
+                ratio,
+                IMBALANCE_THRESHOLD,
+                metric,
+            )
+    return metric, _SCORING_NAMES[metric]
 
 
 def _lazy_boosters(task_type: str) -> dict[str, Any]:
@@ -172,6 +223,9 @@ class TrainingResult:
     task_type: str = ""
     feature_names: list[str] = field(default_factory=list)
     best_metrics: dict[str, Any] = field(default_factory=dict)
+    #: The metric the leaderboard was ranked on. Not always PRIMARY_METRIC:
+    #: imbalanced classification ranks on balanced accuracy instead.
+    ranking_metric: str = ""
 
 
 def evaluate_model(model, X_test, y_test, task_type: str) -> dict[str, Any]:
@@ -181,11 +235,17 @@ def evaluate_model(model, X_test, y_test, task_type: str) -> dict[str, Any]:
     if task_type == CLASSIFICATION:
         return {
             "Accuracy": accuracy_score(y_test, y_pred),
+            # Balanced accuracy averages recall per class, so a model that
+            # simply predicts the majority class scores 0.5 rather than the
+            # majority frequency. On imbalanced data this is the honest number.
+            "Balanced Accuracy": balanced_accuracy_score(y_test, y_pred),
             "Precision": precision_score(
                 y_test, y_pred, average="weighted", zero_division=0
             ),
             "Recall": recall_score(y_test, y_pred, average="weighted", zero_division=0),
             "F1 Score": f1_score(y_test, y_pred, average="weighted", zero_division=0),
+            # Macro-F1 weights every class equally, unlike the weighted variant.
+            "F1 Macro": f1_score(y_test, y_pred, average="macro", zero_division=0),
             "Confusion Matrix": confusion_matrix(y_test, y_pred).tolist(),
         }
     if task_type == REGRESSION:
@@ -281,8 +341,7 @@ def train_models(
     )
 
     cv = _make_cv(y_train, task_type)
-    scoring = "accuracy" if task_type == CLASSIFICATION else "r2"
-    primary_metric = PRIMARY_METRIC[task_type]
+    primary_metric, scoring = _select_ranking_metric(y_train, task_type)
 
     results: dict[str, dict[str, Any]] = {}
     best_score = -np.inf
@@ -375,6 +434,7 @@ def train_models(
         best_metrics=results.get(best_model_name, {}).get("Details", {})
         if best_model_name
         else {},
+        ranking_metric=primary_metric,
     )
 
 

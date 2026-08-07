@@ -28,7 +28,7 @@ from utils.data_utils import (
 )
 from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
-from utils.model_trainer import PRIMARY_METRIC, train_models
+from utils.model_trainer import train_models
 from utils.validation import (
     DatasetValidationError,
     validate_dataframe,
@@ -122,7 +122,7 @@ def main(argv: list[str] | None = None) -> int:
     leaderboard_path = args.output_dir / f"leaderboard_{timestamp}.csv"
     result.leaderboard.to_csv(leaderboard_path, index=False)
 
-    metric_name = PRIMARY_METRIC[task_type]
+    metric_name = result.ranking_metric
     best_score = result.best_metrics.get(metric_name)
     logger.info(
         "Best model: %s (%s=%s)",

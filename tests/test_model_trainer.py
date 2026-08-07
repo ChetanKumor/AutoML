@@ -160,6 +160,74 @@ class TestCrossValidationReporting:
         assert columns.index("Confusion Matrix") > columns.index("F1 Score")
 
 
+class TestClassImbalance:
+    @pytest.fixture
+    def imbalanced_df(self, rng) -> pd.DataFrame:
+        """A 95/5 split, where plain accuracy is a misleading ranking signal."""
+        n = 200
+        minority = 10
+        signal = rng.normal(size=n)
+        target = np.array([0] * (n - minority) + [1] * minority)
+        return pd.DataFrame(
+            {"num_a": signal, "num_b": rng.normal(size=n), "target": target}
+        )
+
+    def test_ranks_on_balanced_accuracy_when_imbalanced(
+        self, imbalanced_df, cheap_classifiers
+    ):
+        X = imbalanced_df.drop(columns=["target"])
+        y = imbalanced_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert result.ranking_metric == "Balanced Accuracy"
+        assert "Balanced Accuracy" in result.leaderboard.columns
+
+    def test_ranks_on_accuracy_when_balanced(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert result.ranking_metric == "Accuracy"
+
+    def test_regression_always_ranks_on_r2(self, regression_df, cheap_regressors):
+        X = regression_df.drop(columns=["price"])
+        y = regression_df["price"]
+
+        assert train_models(X, y, "regression").ranking_metric == "R2 Score"
+
+    def test_majority_class_predictor_scores_half(self, imbalanced_df, monkeypatch):
+        """Balanced accuracy must expose a degenerate majority-class model."""
+        monkeypatch.setattr(
+            model_trainer,
+            "_base_models",
+            lambda task_type: {"Dummy": DummyClassifier(strategy="most_frequent")},
+        )
+        monkeypatch.setattr(model_trainer, "PARAM_GRIDS", {})
+
+        X = imbalanced_df.drop(columns=["target"])
+        y = imbalanced_df["target"]
+        result = train_models(X, y, "classification")
+
+        row = result.leaderboard.set_index("Model").loc["Dummy"]
+        assert row["Accuracy"] > 0.9, "accuracy looks good on skewed data"
+        assert row["Balanced Accuracy"] == pytest.approx(0.5, abs=0.01)
+
+    def test_balance_ratio(self):
+        assert model_trainer._class_balance_ratio(
+            pd.Series([0, 0, 1, 1])
+        ) == pytest.approx(1.0)
+        assert model_trainer._class_balance_ratio(
+            pd.Series([0] * 90 + [1] * 10)
+        ) == pytest.approx(10 / 90)
+
+    def test_macro_f1_is_reported(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        assert "F1 Macro" in train_models(X, y, "classification").leaderboard.columns
+
+
 class TestLeakFreeTraining:
     def test_preprocessor_is_fitted_on_the_training_fold_only(
         self, classification_df, cheap_classifiers, monkeypatch
@@ -239,12 +307,15 @@ class TestEvaluateModel:
 
         assert set(metrics) == {
             "Accuracy",
+            "Balanced Accuracy",
             "Precision",
             "Recall",
             "F1 Score",
+            "F1 Macro",
             "Confusion Matrix",
         }
         assert 0.0 <= metrics["Accuracy"] <= 1.0
+        assert 0.0 <= metrics["Balanced Accuracy"] <= 1.0
 
     def test_regression_metrics(self, regression_df):
         X = regression_df.drop(columns=["price"]).select_dtypes("number")
