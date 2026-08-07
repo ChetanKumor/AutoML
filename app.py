@@ -1,19 +1,20 @@
 # app.py
 
+import os
+import base64
+from datetime import datetime
+
 import streamlit as st
 import pandas as pd
-import pickle
-import os
-import joblib # Import joblib for saving/loading
-import numpy as np # Import numpy for np.nan
+import numpy as np  # for np.nan
+
 from utils.data_utils import load_dataset, analyze_and_prepare_target
 from utils.feature_engineer import preprocess_data
-from utils.model_trainer import train_models # This will be updated to return task_type
-from utils.predict import make_prediction # Import the new make_prediction function
+from utils.model_trainer import train_models
+from utils.predict import make_prediction
+from utils.model_artifact import ModelArtifact
 from utils.constants import MODEL_DIR, ENCODER_DIR
 from utils.logging_utils import setup_logger
-from datetime import datetime
-import base64
 
 logger = setup_logger("StreamlitApp")
 
@@ -139,8 +140,20 @@ if file:
                     model_filename = f"model_{best_model_name}_{timestamp}.pkl"
                     model_path = os.path.join(MODEL_DIR, model_filename)
 
-                    # Save all necessary components together
-                    joblib.dump((best_model_obj, fitted_preprocessor_pipeline, label_encoder, task_type), model_path)
+                    # Persist a single, self-describing artifact so training and
+                    # inference always agree on the serialized contract.
+                    ModelArtifact(
+                        model=best_model_obj,
+                        preprocessor=fitted_preprocessor_pipeline,
+                        task_type=task_type,
+                        target_column=target_col,
+                        label_encoder=label_encoder,
+                        model_name=best_model_name,
+                        feature_names=[
+                            c for c in processed_df_for_training.columns if c != target_col
+                        ],
+                        metrics=results.get(best_model_name, {}).get("Details", {}),
+                    ).save(model_path)
 
                     st.success(f"Training complete! Best model '{best_model_name}' saved to '{model_path}'")
 
