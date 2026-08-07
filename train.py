@@ -20,12 +20,12 @@ from pathlib import Path
 import pandas as pd
 
 from utils.auto_target_identifier import detect_task_type
+from utils.constants import ensure_directories
 from utils.data_utils import (
     analyze_and_prepare_target,
     detect_target_column,
     load_dataset,
 )
-from utils.constants import ensure_directories
 from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
 from utils.model_trainer import PRIMARY_METRIC, train_models

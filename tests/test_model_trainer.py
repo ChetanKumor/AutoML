@@ -8,7 +8,6 @@ split, the leak-free fit, ranking and failure handling -- is what matters here.
 from __future__ import annotations
 
 import numpy as np
-import pandas as pd
 import pytest
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression

@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import warnings
 from dataclasses import dataclass, field
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -88,10 +88,17 @@ def _lazy_boosters(task_type: str) -> dict[str, Any]:
     try:
         from catboost import CatBoostClassifier, CatBoostRegressor
 
+        # allow_writing_files=False stops CatBoost from littering the working
+        # directory with a catboost_info/ telemetry folder on every fit.
+        catboost_kwargs = {
+            "verbose": 0,
+            "random_state": DEFAULT_RANDOM_STATE,
+            "allow_writing_files": False,
+        }
         models["CatBoost"] = (
-            CatBoostClassifier(verbose=0, random_state=DEFAULT_RANDOM_STATE)
+            CatBoostClassifier(**catboost_kwargs)
             if is_clf
-            else CatBoostRegressor(verbose=0, random_state=DEFAULT_RANDOM_STATE)
+            else CatBoostRegressor(**catboost_kwargs)
         )
     except ImportError:  # pragma: no cover
         logger.warning("catboost not installed; skipping CatBoost.")
@@ -158,10 +165,10 @@ class TrainingResult:
     """
 
     leaderboard: pd.DataFrame
-    best_model_name: Optional[str]
-    best_pipeline: Optional[Pipeline]
-    best_estimator: Optional[Any]
-    preprocessor: Optional[Any]
+    best_model_name: str | None
+    best_pipeline: Pipeline | None
+    best_estimator: Any | None
+    preprocessor: Any | None
     task_type: str = ""
     feature_names: list[str] = field(default_factory=list)
     best_metrics: dict[str, Any] = field(default_factory=dict)
@@ -280,8 +287,8 @@ def train_models(
 
     results: dict[str, dict[str, Any]] = {}
     best_score = -np.inf
-    best_model_name: Optional[str] = None
-    best_estimator: Optional[Any] = None
+    best_model_name: str | None = None
+    best_estimator: Any | None = None
 
     logger.info("Training candidate models with hyperparameter search...")
     for name, model in _base_models(task_type).items():

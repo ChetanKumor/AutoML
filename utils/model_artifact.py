@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Optional
+from typing import Any
 
 import joblib
 
@@ -49,7 +49,7 @@ class ModelArtifact:
     preprocessor: Any
     task_type: str
     target_column: str
-    label_encoder: Optional[Any] = None
+    label_encoder: Any | None = None
     model_name: str = ""
     feature_names: list[str] = field(default_factory=list)
     metrics: dict[str, Any] = field(default_factory=dict)
@@ -72,7 +72,7 @@ class ModelArtifact:
         joblib.dump(self, path)
 
     @classmethod
-    def load(cls, path: str) -> "ModelArtifact":
+    def load(cls, path: str) -> ModelArtifact:
         """Load an artifact from ``path``.
 
         Raises:

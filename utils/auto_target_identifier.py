@@ -1,12 +1,9 @@
-import pandas as pd
-import numpy as np
 import re
-from sklearn.preprocessing import LabelEncoder
-from sklearn.feature_selection import VarianceThreshold
-from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor
-from sklearn.metrics import r2_score, accuracy_score
-from typing import Tuple, Optional
 from difflib import get_close_matches
+
+import numpy as np
+import pandas as pd
+from sklearn.preprocessing import LabelEncoder
 
 
 def clean_numeric_string(val):
@@ -33,7 +30,7 @@ def clean_numeric_string(val):
     return val
 
 
-def clean_target_column(series: pd.Series) -> Tuple[np.ndarray, Optional[object]]:
+def clean_target_column(series: pd.Series) -> tuple[np.ndarray, object | None]:
     """
     Cleans and processes the target column.
     - Attempts to convert to numeric (float).
@@ -57,17 +54,22 @@ def clean_target_column(series: pd.Series) -> Tuple[np.ndarray, Optional[object]
         return y_encoded, le
 
 
+#: A column missing more than this fraction of its values is a poor target.
+MAX_TARGET_MISSING_RATIO = 0.3
+
+
 def is_potential_target(series: pd.Series) -> bool:
+    """Report whether ``series`` is plausible as a prediction target.
+
+    Rejects constant columns (nothing to learn), mostly-missing columns, and
+    all-unique columns (which are almost always identifiers).
     """
-    Checks if a series is a potential target column based on basic heuristics.
-    """
-    if series.nunique() <= 1: # Too few unique values
-        return False
-    if series.isnull().mean() > 0.3: # Too many missing values
-        return False
-    if series.nunique() == len(series):  # All unique, likely an ID column
-        return False
-    return True
+    distinct = series.nunique()
+    return (
+        distinct > 1
+        and distinct != len(series)
+        and series.isnull().mean() <= MAX_TARGET_MISSING_RATIO
+    )
 
 
 #: A numeric target with more distinct values than this is treated as continuous.
@@ -128,7 +130,7 @@ def detect_task_type(y_processed: pd.Series) -> str:
     return 'regression'
 
 
-def auto_target_identifier(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, Optional[object]]:
+def auto_target_identifier(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series, object | None]:
     """
     Automatically identifies the target column, preprocesses it, and returns
     features (X), processed target (y), and the encoder used.
@@ -141,10 +143,11 @@ def auto_target_identifier(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.Series, O
     # Attempt 1: Fuzzy match on column names
     # Iterate through a copy of columns to allow modification during iteration if needed
     for col in list(df.columns):
-        if get_close_matches(col.lower(), possible_names, n=1, cutoff=0.8):
-            if is_potential_target(df[col]):
-                target_col = col
-                break
+        if get_close_matches(
+            col.lower(), possible_names, n=1, cutoff=0.8
+        ) and is_potential_target(df[col]):
+            target_col = col
+            break
     
     # Attempt 2: Based on inferred task type from processed data
     # This loop will now use the stricter detect_task_type

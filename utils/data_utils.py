@@ -1,8 +1,8 @@
-import pandas as pd
+
 import numpy as np
-import re
+import pandas as pd
 from sklearn.preprocessing import LabelEncoder
-from typing import Tuple
+
 
 def load_dataset(file) -> pd.DataFrame:
     """
@@ -40,21 +40,30 @@ def clean_currency_symbols(column: pd.Series) -> pd.Series:
     """
     return column.replace(r'[^0-9.-]', '', regex=True).astype(float)
 
-def preprocess_target_column(y: pd.Series) -> Tuple[np.ndarray, object]:
-    """
-    Cleans and encodes the target column.
-    - If it's numeric-looking with symbols, cleans and converts to float.
-    - If it's categorical, encodes with LabelEncoder.
+def preprocess_target_column(y: pd.Series) -> tuple[np.ndarray, object | None]:
+    """Clean and, when necessary, encode the target column.
+
+    A numeric-looking target (including one decorated with currency or percent
+    symbols) is converted to float and needs no encoder. Anything else is
+    treated as categorical and label-encoded.
+
+    Args:
+        y: The raw target series.
+
+    Returns:
+        A ``(values, encoder)`` pair, where ``encoder`` is ``None`` for numeric
+        targets and a fitted ``LabelEncoder`` otherwise.
     """
     try:
-        y_cleaned = clean_currency_symbols(y)
-        return y_cleaned.values, None  # No encoder needed
-    except:
-        le = LabelEncoder()
-        y_encoded = le.fit_transform(y.astype(str))
-        return y_encoded, le
+        return clean_currency_symbols(y).values, None
+    except (ValueError, TypeError, AttributeError):
+        # Not numeric-like: fall back to categorical encoding. The exception
+        # types are named explicitly so that genuine bugs (KeyboardInterrupt,
+        # MemoryError, typos raising NameError) are not silently swallowed.
+        encoder = LabelEncoder()
+        return encoder.fit_transform(y.astype(str)), encoder
 
-def analyze_and_prepare_target(df: pd.DataFrame, target_col: str) -> Tuple[pd.DataFrame, np.ndarray, object]:
+def analyze_and_prepare_target(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, np.ndarray, object]:
     """
     Drops the target column from features, preprocesses it, and returns:
     - cleaned X (features)

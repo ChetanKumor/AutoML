@@ -1,18 +1,19 @@
 # utils/feature_engineer.py
 
-import pandas as pd
 import numpy as np
-from sklearn.base import BaseEstimator, TransformerMixin
-from sklearn.impute import SimpleImputer
-from sklearn.preprocessing import StandardScaler, OneHotEncoder
-from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer, make_column_selector as selector
-from sklearn.feature_selection import VarianceThreshold
-from sklearn.ensemble import IsolationForest
-from sklearn.preprocessing import PowerTransformer
+import pandas as pd
 
 # Import set_config from sklearn to enforce DataFrame output
 from sklearn import set_config
+from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.compose import ColumnTransformer
+from sklearn.compose import make_column_selector as selector
+from sklearn.ensemble import IsolationForest
+from sklearn.feature_selection import VarianceThreshold
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, PowerTransformer, StandardScaler
+
 # Ensure all transformers output pandas DataFrames where possible
 set_config(transform_output="pandas")
 
@@ -156,8 +157,13 @@ class RareCategoryGrouper(_ColumnPreservingMixin, BaseEstimator, TransformerMixi
 
         X_transformed = X.copy()
         for col, rares in self.mappings.items():
-            # Replace rare labels with 'Other'
-            X_transformed[col] = X_transformed[col].apply(lambda x: 'Other' if x in rares else x)
+            if col not in X_transformed.columns or not rares:
+                continue
+            # Replace rare labels with 'Other'. `where` avoids a per-row lambda
+            # that would close over the loop variable.
+            X_transformed[col] = X_transformed[col].where(
+                ~X_transformed[col].isin(rares), 'Other'
+            )
         return X_transformed
 
 

@@ -2,20 +2,20 @@
 
 from datetime import datetime
 
-import streamlit as st
 import pandas as pd
+import streamlit as st
 
 from utils.auto_target_identifier import detect_task_type
+from utils.constants import MODEL_DIR, ensure_directories
 from utils.data_utils import (
     analyze_and_prepare_target,
     detect_target_column,
     load_dataset,
 )
+from utils.logging_utils import configure_logging, get_logger
+from utils.model_artifact import ModelArtifact
 from utils.model_trainer import PRIMARY_METRIC, train_models
 from utils.predict import make_prediction
-from utils.model_artifact import ModelArtifact
-from utils.constants import MODEL_DIR, ensure_directories
-from utils.logging_utils import configure_logging, get_logger
 
 configure_logging()
 logger = get_logger("streamlit_app")
