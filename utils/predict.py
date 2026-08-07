@@ -7,10 +7,10 @@ import os
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
-from utils.logging_utils import setup_logger
+from utils.logging_utils import get_logger
 from utils.model_artifact import ModelArtifact
 
-logger = setup_logger("PredictModule")
+logger = get_logger("predict")
 
 PREDICTION_COLUMN = "Predicted_Target"
 

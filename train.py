@@ -25,11 +25,12 @@ from utils.data_utils import (
     detect_target_column,
     load_dataset,
 )
-from utils.logging_utils import setup_logger
+from utils.constants import ensure_directories
+from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
 from utils.model_trainer import PRIMARY_METRIC, train_models
 
-logger = setup_logger("TrainCLI")
+logger = get_logger("train_cli")
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -63,6 +64,10 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run the training pipeline. Returns a process exit code."""
     args = parse_args(argv)
+    # Configure logging only after argument parsing, so --help/usage errors
+    # exit without creating a log directory.
+    configure_logging()
+    ensure_directories()
 
     if not args.data.exists():
         logger.error("Dataset not found: %s", args.data)

@@ -1,7 +1,5 @@
-# app.py
+"""Streamlit front-end for the Robo Data Scientist AutoML platform."""
 
-import os
-import base64
 from datetime import datetime
 
 import streamlit as st
@@ -13,21 +11,21 @@ from utils.data_utils import (
     detect_target_column,
     load_dataset,
 )
-from utils.model_trainer import train_models
+from utils.model_trainer import PRIMARY_METRIC, train_models
 from utils.predict import make_prediction
 from utils.model_artifact import ModelArtifact
-from utils.constants import MODEL_DIR, ENCODER_DIR
-from utils.logging_utils import setup_logger
+from utils.constants import MODEL_DIR, ensure_directories
+from utils.logging_utils import configure_logging, get_logger
 
-logger = setup_logger("StreamlitApp")
+configure_logging()
+logger = get_logger("streamlit_app")
 
 st.set_page_config(page_title="Robo Data Scientist 🤖", layout="wide")
 st.title("🤖 Robo Data Scientist - AutoML App")
 st.markdown("Upload any structured dataset (CSV/Excel), and we'll train 15+ models, rank them, and let you make predictions!")
 
-# Ensure MODEL_DIR and ENCODER_DIR exist
-os.makedirs(MODEL_DIR, exist_ok=True)
-os.makedirs(ENCODER_DIR, exist_ok=True)
+# Create runtime directories once, at the application entrypoint.
+ensure_directories()
 
 
 # Sidebar for file upload and training
@@ -79,8 +77,10 @@ if file:
                 # Conditional saving and download button
                 if result.best_estimator is not None:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    model_filename = f"model_{result.best_model_name}_{timestamp}.pkl"
-                    model_path = os.path.join(MODEL_DIR, model_filename)
+                    model_path = (
+                        MODEL_DIR
+                        / f"model_{result.best_model_name}_{timestamp}.pkl"
+                    )
 
                     # Persist a single, self-describing artifact so training and
                     # inference always agree on the serialized contract.
@@ -90,62 +90,72 @@ if file:
                         task_type=task_type,
                         target_column=target_col,
                         label_encoder=label_encoder,
-                        model_name=result.best_model_name,
+                        model_name=result.best_model_name or "",
                         feature_names=result.feature_names,
                         metrics=result.best_metrics,
-                    ).save(model_path)
+                    ).save(str(model_path))
 
+                    metric_name = PRIMARY_METRIC[task_type]
+                    best_score = result.best_metrics.get(metric_name)
                     st.success(
-                        f"Training complete! Best model "
-                        f"'{result.best_model_name}' saved to '{model_path}'"
+                        f"Best model: **{result.best_model_name}** "
+                        f"({metric_name}: {best_score:.4f})"
+                        if isinstance(best_score, float)
+                        else f"Best model: **{result.best_model_name}**"
+                    )
+                    st.caption(f"Saved to `{model_path}`")
+
+                    st.download_button(
+                        label="📥 Download Best Model",
+                        data=model_path.read_bytes(),
+                        file_name=model_path.name,
+                        mime="application/octet-stream",
+                    )
+                else:
+                    st.warning(
+                        "No model could be trained successfully. Check the "
+                        "leaderboard's Error column and the application logs."
                     )
 
-                    with open(model_path, "rb") as file_to_download:
-                        btn = st.download_button(
-                            label="📥 Download Best Model",
-                            data=file_to_download,
-                            file_name=os.path.basename(model_path),
-                            mime="application/octet-stream"
-                        )
-                else:
-                    st.warning("No best model could be trained successfully. Please check logs for errors or try a different dataset.")
-
-
-            except Exception as e:
-                st.error(f"Training failed: {e}")
-                logger.error(f"Training Error: {e}", exc_info=True)
-                st.exception(e) # Display full traceback in Streamlit
+            except Exception as exc:
+                st.error(f"Training failed: {exc}")
+                logger.exception("Training failed")
 
     # Prediction section
     st.sidebar.markdown("---")
     st.sidebar.header("🧪 Make Predictions")
-    pred_file = st.sidebar.file_uploader("Upload Data for Prediction", type=["csv", "xlsx"], key="pred_uploader")
+    pred_file = st.sidebar.file_uploader(
+        "Upload Data for Prediction", type=["csv", "xlsx"], key="pred_uploader"
+    )
 
-    # List available models
-    model_files = [f for f in os.listdir(MODEL_DIR) if f.endswith('.pkl')]
-    selected_model = st.sidebar.selectbox("Choose Saved Model", model_files if model_files else ["No model found"], key="model_selector")
+    model_files = sorted(
+        (p.name for p in MODEL_DIR.glob("*.pkl")), reverse=True
+    )
+    if not model_files:
+        st.sidebar.info("Train a model first to enable predictions.")
+    else:
+        selected_model = st.sidebar.selectbox(
+            "Choose Saved Model", model_files, key="model_selector"
+        )
 
-    if pred_file and selected_model != "No model found":
-        input_df_for_prediction = load_dataset(pred_file)
-        model_path_for_prediction = os.path.join(MODEL_DIR, selected_model)
+        if pred_file:
+            with st.spinner("Making predictions..."):
+                try:
+                    preds_df = make_prediction(
+                        load_dataset(pred_file), str(MODEL_DIR / selected_model)
+                    )
+                    st.subheader("🔮 Predictions")
+                    st.dataframe(preds_df, use_container_width=True)
 
-        with st.spinner("Making predictions..."):
-            try:
-                # Call the make_prediction function from utils.predict
-                preds_df = make_prediction(input_df_for_prediction, model_path_for_prediction)
-                st.subheader("🔮 Predictions")
-                st.dataframe(preds_df)
-
-                # Download predictions
-                csv = preds_df.to_csv(index=False)
-                b64 = base64.b64encode(csv.encode()).decode()
-                href = f'<a href="data:file/csv;base64,{b64}" download="predictions.csv">📥 Download Predictions</a>'
-                st.markdown(href, unsafe_allow_html=True)
-
-            except Exception as e:
-                st.error(f"Prediction failed: {e}")
-                logger.error(f"Prediction Error: {e}", exc_info=True)
-                st.exception(e) # Display full traceback in Streamlit
+                    st.download_button(
+                        label="📥 Download Predictions",
+                        data=preds_df.to_csv(index=False).encode("utf-8"),
+                        file_name="predictions.csv",
+                        mime="text/csv",
+                    )
+                except Exception as exc:
+                    st.error(f"Prediction failed: {exc}")
+                    logger.exception("Prediction failed")
 else:
-    st.warning("Please upload a dataset to get started.")
+    st.info("👈 Upload a dataset in the sidebar to get started.")
 

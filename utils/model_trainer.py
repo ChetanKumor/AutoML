@@ -45,7 +45,7 @@ from utils.feature_engineer import build_preprocessor
 from utils.logging_utils import get_logger
 from utils.model_artifact import CLASSIFICATION, REGRESSION
 
-logger = get_logger()
+logger = get_logger("trainer")
 
 warnings.filterwarnings("ignore")
 
