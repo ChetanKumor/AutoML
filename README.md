@@ -82,6 +82,29 @@ Upload a CSV or Excel file, confirm the suggested target column, and train.
 The app shows the ranked leaderboard, lets you download the winning artifact,
 and can score a second uploaded file against any saved model.
 
+### Run in Docker
+
+```bash
+docker build -t robo-data-scientist .
+docker run --rm -p 8501:8501 -v "$PWD/saved_models:/app/saved_models" robo-data-scientist
+```
+
+Then open <http://localhost:8501>. The image runs as a non-root user and
+exposes a health check on `/_stcore/health`. Mounting `saved_models` keeps
+trained artifacts on the host after the container exits.
+
+### Common tasks
+
+A `Makefile` wraps the usual commands — run `make help` to list them.
+
+```bash
+make install-dev    # install runtime + dev dependencies
+make check          # lint + tests, exactly what CI runs
+make train          # train on the bundled dataset
+make run            # start the Streamlit app
+make docker-build   # build the image
+```
+
 ### Predict from Python
 
 ```python
