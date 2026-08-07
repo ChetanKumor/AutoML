@@ -16,6 +16,12 @@ from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
 from utils.model_trainer import PRIMARY_METRIC, train_models
 from utils.predict import make_prediction
+from utils.validation import (
+    DatasetValidationError,
+    validate_dataframe,
+    validate_target,
+    validate_upload,
+)
 
 configure_logging()
 logger = get_logger("streamlit_app")
@@ -23,7 +29,8 @@ logger = get_logger("streamlit_app")
 st.set_page_config(page_title="Robo Data Scientist 🤖", layout="wide")
 st.title("🤖 Robo Data Scientist - AutoML App")
 st.markdown(
-    "Upload any structured dataset (CSV/Excel), and we'll train 15+ models, rank them, and let you make predictions!"
+    "Upload a tabular dataset (CSV or Excel). The app profiles the target, "
+    "trains and ranks a family of models, and lets you predict with the winner."
 )
 
 # Create runtime directories once, at the application entrypoint.
@@ -35,9 +42,22 @@ st.sidebar.header("📁 Upload Dataset")
 file = st.sidebar.file_uploader("Upload CSV or Excel file", type=["csv", "xlsx"])
 
 if file:
-    df = load_dataset(file)
+    try:
+        validate_upload(file)
+        df = load_dataset(file)
+        validate_dataframe(df)
+    except DatasetValidationError as exc:
+        st.error(f"❌ {exc}")
+        logger.warning("Rejected upload %s: %s", getattr(file, "name", "?"), exc)
+        st.stop()
+    except Exception as exc:
+        st.error(f"❌ Could not read the file: {exc}")
+        logger.exception("Failed to parse upload")
+        st.stop()
+
     st.subheader("📊 Raw Dataset Preview")
-    st.dataframe(df.head())
+    st.dataframe(df.head(), use_container_width=True)
+    st.caption(f"{len(df):,} rows x {df.shape[1]} columns")
 
     # Suggest a target column, but let the user override it.
     suggested_target = detect_target_column(df)
@@ -54,6 +74,8 @@ if file:
     if st.sidebar.button("🚀 Train Models"):
         with st.spinner("Training models... This may take a while! ⏳"):
             try:
+                validate_target(df, target_col)
+
                 # Separate features from the (cleaned/encoded) target.
                 X_raw, y, label_encoder = analyze_and_prepare_target(
                     df.copy(), target_col
@@ -115,6 +137,9 @@ if file:
                         "leaderboard's Error column and the application logs."
                     )
 
+            except DatasetValidationError as exc:
+                st.error(f"❌ {exc}")
+                logger.warning("Training rejected: %s", exc)
             except Exception as exc:
                 st.error(f"Training failed: {exc}")
                 logger.exception("Training failed")
@@ -137,9 +162,10 @@ if file:
         if pred_file:
             with st.spinner("Making predictions..."):
                 try:
-                    preds_df = make_prediction(
-                        load_dataset(pred_file), str(MODEL_DIR / selected_model)
-                    )
+                    validate_upload(pred_file)
+                    pred_df = load_dataset(pred_file)
+                    validate_dataframe(pred_df)
+                    preds_df = make_prediction(pred_df, str(MODEL_DIR / selected_model))
                     st.subheader("🔮 Predictions")
                     st.dataframe(preds_df, use_container_width=True)
 
@@ -149,6 +175,9 @@ if file:
                         file_name="predictions.csv",
                         mime="text/csv",
                     )
+                except DatasetValidationError as exc:
+                    st.error(f"❌ {exc}")
+                    logger.warning("Prediction input rejected: %s", exc)
                 except Exception as exc:
                     st.error(f"Prediction failed: {exc}")
                     logger.exception("Prediction failed")

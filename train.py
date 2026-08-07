@@ -29,6 +29,12 @@ from utils.data_utils import (
 from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
 from utils.model_trainer import PRIMARY_METRIC, train_models
+from utils.validation import (
+    DatasetValidationError,
+    validate_dataframe,
+    validate_target,
+    validate_upload,
+)
 
 logger = get_logger("train_cli")
 
@@ -74,19 +80,19 @@ def main(argv: list[str] | None = None) -> int:
         return 1
 
     logger.info("Loading dataset from %s", args.data)
-    df = load_dataset(str(args.data))
-    if df.empty:
-        logger.error("Dataset %s contains no rows.", args.data)
+    try:
+        validate_upload(str(args.data))
+        df = load_dataset(str(args.data))
+        validate_dataframe(df)
+        target_col = args.target or detect_target_column(df)
+        validate_target(df, target_col)
+    except DatasetValidationError as exc:
+        logger.error("%s", exc)
+        return 1
+    except Exception as exc:
+        logger.error("Could not read %s: %s", args.data, exc)
         return 1
 
-    target_col = args.target or detect_target_column(df)
-    if target_col not in df.columns:
-        logger.error(
-            "Target column %r not found. Available columns: %s",
-            target_col,
-            list(df.columns),
-        )
-        return 1
     logger.info("Target column: %s", target_col)
 
     X, y, label_encoder = analyze_and_prepare_target(df.copy(), target_col)
