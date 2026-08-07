@@ -1,2 +1,0 @@
-2025-06-15 15:36:50,607 | INFO |  Logger initialized at logs\StreamlitApp_2025-06-15_15-36-50.log
-2025-06-15 15:36:52,370 | ERROR | Training Error: 'numpy.ndarray' object has no attribute 'select_dtypes'
