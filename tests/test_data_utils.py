@@ -79,9 +79,7 @@ class TestCleanCurrencySymbols:
 
 class TestAnalyzeAndPrepareTarget:
     def test_splits_features_and_target(self, classification_df):
-        X, y, encoder = analyze_and_prepare_target(
-            classification_df.copy(), "target"
-        )
+        X, y, encoder = analyze_and_prepare_target(classification_df.copy(), "target")
 
         assert "target" not in X.columns
         assert len(X) == len(classification_df)

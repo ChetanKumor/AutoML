@@ -55,9 +55,7 @@ def test_loaded_model_predicts(artifact, classification_df, tmp_path):
 def test_load_rejects_legacy_tuple(artifact, tmp_path):
     """The old (model, preprocessor, encoder, task_type) tuple must not load."""
     path = tmp_path / "legacy.pkl"
-    joblib.dump(
-        (artifact.model, artifact.preprocessor, None, CLASSIFICATION), str(path)
-    )
+    joblib.dump((artifact.model, artifact.preprocessor, None, CLASSIFICATION), str(path))
 
     with pytest.raises(ValueError, match="does not contain a ModelArtifact"):
         ModelArtifact.load(str(path))

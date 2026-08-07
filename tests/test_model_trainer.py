@@ -145,9 +145,7 @@ class TestLeakFreeTraining:
 
 
 class TestFailureHandling:
-    def test_failing_model_is_recorded_not_raised(
-        self, classification_df, monkeypatch
-    ):
+    def test_failing_model_is_recorded_not_raised(self, classification_df, monkeypatch):
         class Exploding:
             def fit(self, X, y):
                 raise RuntimeError("boom")

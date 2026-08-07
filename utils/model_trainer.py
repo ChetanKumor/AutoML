@@ -274,8 +274,7 @@ def train_models(
     X_test = preprocessor.transform(X_test_raw)
     feature_names = [str(c) for c in getattr(X_train, "columns", [])]
     logger.info(
-        "Preprocessor fitted on the training fold only "
-        "(train=%s, test=%s, features=%d).",
+        "Preprocessor fitted on the training fold only (train=%s, test=%s, features=%d).",
         X_train_raw.shape,
         X_test_raw.shape,
         len(feature_names) or X_train.shape[1],
@@ -341,7 +340,9 @@ def train_models(
         best_pipeline = Pipeline(
             [("preprocessor", preprocessor), ("model", best_estimator)]
         )
-        logger.info("Best model: %s (%s=%.4f)", best_model_name, primary_metric, best_score)
+        logger.info(
+            "Best model: %s (%s=%.4f)", best_model_name, primary_metric, best_score
+        )
     else:
         logger.warning("No model trained successfully.")
 

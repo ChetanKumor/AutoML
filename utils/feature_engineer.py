@@ -56,15 +56,21 @@ class FeatureTypeCleaner(_ColumnPreservingMixin, BaseEstimator, TransformerMixin
     def transform(self, X):
         # Ensure X is a DataFrame; if it's a NumPy array, convert it (though set_config should handle this)
         if not isinstance(X, pd.DataFrame):
-            X = pd.DataFrame(X) # This conversion might lose column names if X was from a previous array output
+            X = pd.DataFrame(
+                X
+            )  # This conversion might lose column names if X was from a previous array output
 
         X = X.copy()
-        for col in X.select_dtypes(include=['object']).columns:
+        for col in X.select_dtypes(include=["object"]).columns:
             # Check if the column contains any currency or percentage symbols
-            if X[col].astype(str).str.contains(r'[\$%₹,]').any(): # Added comma for thousands separator
+            if (
+                X[col].astype(str).str.contains(r"[\$%₹,]").any()
+            ):  # Added comma for thousands separator
                 # Remove symbols and convert to numeric, coercing errors to NaN
-                X[col] = X[col].astype(str).replace(r'[\$,%₹]', '', regex=True) # Remove symbols
-                X[col] = pd.to_numeric(X[col], errors='coerce') # Convert to numeric
+                X[col] = (
+                    X[col].astype(str).replace(r"[\$,%₹]", "", regex=True)
+                )  # Remove symbols
+                X[col] = pd.to_numeric(X[col], errors="coerce")  # Convert to numeric
         return X
 
 
@@ -74,11 +80,12 @@ class OutlierRemover(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
     with the column's median, instead of removing rows.
     Contamination is set to 0.01 (1% of data are outliers).
     """
+
     def __init__(self, contamination=0.01, random_state=42):
         self.contamination = contamination
         self.random_state = random_state
-        self.detectors = {} # Stores fitted IsolationForest models for each numeric column
-        self.medians = {} # Stores median values for each numeric column
+        self.detectors = {}  # Stores fitted IsolationForest models for each numeric column
+        self.medians = {}  # Stores median values for each numeric column
 
     def fit(self, X, y=None):
         # Ensure X is a DataFrame
@@ -91,8 +98,7 @@ class OutlierRemover(_ColumnPreservingMixin, BaseEstimator, TransformerMixin):
             # Fit IsolationForest only on the current numeric column
             # Reshape to 2D array as IsolationForest expects
             self.detectors[col] = IsolationForest(
-                contamination=self.contamination,
-                random_state=self.random_state
+                contamination=self.contamination, random_state=self.random_state
             ).fit(X[[col]])
             # Store the median of the column for capping
             self.medians[col] = X[col].median()
@@ -131,9 +137,10 @@ class RareCategoryGrouper(_ColumnPreservingMixin, BaseEstimator, TransformerMixi
     Groups rare categories in object/category/bool columns into an 'Other' category.
     Rare categories are those with a frequency below a specified threshold.
     """
+
     def __init__(self, threshold=0.01):
         self.threshold = threshold
-        self.mappings = {} # Stores rare labels for each categorical column
+        self.mappings = {}  # Stores rare labels for each categorical column
 
     def fit(self, X, y=None):
         # Ensure X is a DataFrame
@@ -142,12 +149,12 @@ class RareCategoryGrouper(_ColumnPreservingMixin, BaseEstimator, TransformerMixi
         self._record_input_features(X)
         self.mappings = {}
 
-        for col in X.select_dtypes(include=['object', 'category', 'bool']).columns:
+        for col in X.select_dtypes(include=["object", "category", "bool"]).columns:
             # Calculate value frequencies
             freq = X[col].value_counts(normalize=True)
             # Identify rare labels (frequency below threshold)
             rare_labels = set(freq[freq < self.threshold].index)
-            self.mappings[col] = rare_labels # Store rare labels for transformation
+            self.mappings[col] = rare_labels  # Store rare labels for transformation
         return self
 
     def transform(self, X):
@@ -162,7 +169,7 @@ class RareCategoryGrouper(_ColumnPreservingMixin, BaseEstimator, TransformerMixi
             # Replace rare labels with 'Other'. `where` avoids a per-row lambda
             # that would close over the loop variable.
             X_transformed[col] = X_transformed[col].where(
-                ~X_transformed[col].isin(rares), 'Other'
+                ~X_transformed[col].isin(rares), "Other"
             )
         return X_transformed
 
@@ -171,10 +178,11 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
     """
     Selects features based on variance threshold and removes highly correlated features.
     """
+
     def __init__(self, corr_threshold=0.9, var_threshold=0.0):
         self.corr_threshold = corr_threshold
         self.var_threshold = var_threshold
-        self.selected_columns = [] # Stores the names of selected columns
+        self.selected_columns = []  # Stores the names of selected columns
 
     def fit(self, X, y=None):
         # Ensure X is a DataFrame
@@ -191,22 +199,30 @@ class FeatureSelector(BaseEstimator, TransformerMixin):
             # Get names of columns retained after variance thresholding
             retained_by_variance = X[numeric_cols].columns[temp_selector.get_support()]
         else:
-            retained_by_variance = pd.Index([]) # No numeric columns
+            retained_by_variance = pd.Index([])  # No numeric columns
 
         # Step 2: Remove highly correlated features from the variance-retained numeric columns
         to_drop_corr = []
         if not retained_by_variance.empty:
             corr_matrix = X[retained_by_variance].corr().abs()
             # Select upper triangle of correlation matrix to avoid duplicates
-            upper = corr_matrix.where(np.triu(np.ones(corr_matrix.shape), k=1).astype(bool))
+            upper = corr_matrix.where(
+                np.triu(np.ones(corr_matrix.shape), k=1).astype(bool)
+            )
             # Find columns with correlation greater than threshold
-            to_drop_corr = [column for column in upper.columns if any(upper[column] > self.corr_threshold)]
+            to_drop_corr = [
+                column
+                for column in upper.columns
+                if any(upper[column] > self.corr_threshold)
+            ]
 
         # Combine selected numeric and original non-numeric columns
         # All original columns that are not numeric are kept as is,
         # then numeric columns after variance and correlation selection are added.
         initial_non_numeric_cols = X.select_dtypes(exclude=np.number).columns.tolist()
-        final_numeric_cols = [col for col in retained_by_variance if col not in to_drop_corr]
+        final_numeric_cols = [
+            col for col in retained_by_variance if col not in to_drop_corr
+        ]
 
         self.selected_columns = initial_non_numeric_cols + final_numeric_cols
         self._fitted = True
@@ -235,6 +251,7 @@ class SkewnessCorrector(_ColumnPreservingMixin, BaseEstimator, TransformerMixin)
     """
     Applies PowerTransformer (Yeo-Johnson) to highly skewed numeric columns.
     """
+
     def __init__(self):
         self.transformers = {}
 
@@ -249,7 +266,7 @@ class SkewnessCorrector(_ColumnPreservingMixin, BaseEstimator, TransformerMixin)
             # Check for skewness (absolute skewness > 1 is a common heuristic)
             skew = X[col].skew()
             if pd.notna(skew) and abs(skew) > 1:
-                transformer = PowerTransformer(method='yeo-johnson')
+                transformer = PowerTransformer(method="yeo-johnson")
                 # Fit the transformer on the column (reshaped to 2D)
                 transformer.fit(X[[col]])
                 self.transformers[col] = transformer
@@ -271,8 +288,9 @@ class PreprocessorBuilder:
     """
     Builds a comprehensive preprocessing pipeline using custom and scikit-learn transformers.
     """
+
     def __init__(self):
-        self.pipeline = None # Stores the complete preprocessing pipeline
+        self.pipeline = None  # Stores the complete preprocessing pipeline
 
     def build_pipeline(self, X_raw_for_inference: pd.DataFrame = None):
         """Build the (unfitted) preprocessing pipeline.
@@ -290,16 +308,26 @@ class PreprocessorBuilder:
         Returns:
             Pipeline: The unfitted scikit-learn Pipeline.
         """
-        num_pipeline = Pipeline([
-            ("imputer", SimpleImputer(strategy="mean")),
-            ("skew_correct", SkewnessCorrector()), # Apply skewness correction
-            ("scaler", StandardScaler()) # Scale numeric features
-        ])
+        num_pipeline = Pipeline(
+            [
+                ("imputer", SimpleImputer(strategy="mean")),
+                ("skew_correct", SkewnessCorrector()),  # Apply skewness correction
+                ("scaler", StandardScaler()),  # Scale numeric features
+            ]
+        )
 
-        cat_pipeline = Pipeline([
-            ("imputer", SimpleImputer(strategy="most_frequent")), # Impute missing categorical values
-            ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)) # One-hot encode
-        ])
+        cat_pipeline = Pipeline(
+            [
+                (
+                    "imputer",
+                    SimpleImputer(strategy="most_frequent"),
+                ),  # Impute missing categorical values
+                (
+                    "encoder",
+                    OneHotEncoder(handle_unknown="ignore", sparse_output=False),
+                ),  # One-hot encode
+            ]
+        )
 
         # The two selectors partition every column, so `remainder` never fires.
         preprocessor_transformer = ColumnTransformer(
@@ -311,13 +339,21 @@ class PreprocessorBuilder:
         )
 
         # Define the complete preprocessing pipeline
-        self.pipeline = Pipeline([
-            ("cleaner", FeatureTypeCleaner()),         # Custom cleaning (currency, etc.)
-            ("rare_grouper", RareCategoryGrouper()),   # Group rare categories
-            ("outlier", OutlierRemover()),             # Handle outliers (now by capping)
-            ("selector", FeatureSelector()),           # Feature selection (variance, correlation)
-            ("column_transform", preprocessor_transformer) # Apply ColumnTransformer (impute, scale, encode)
-        ])
+        self.pipeline = Pipeline(
+            [
+                ("cleaner", FeatureTypeCleaner()),  # Custom cleaning (currency, etc.)
+                ("rare_grouper", RareCategoryGrouper()),  # Group rare categories
+                ("outlier", OutlierRemover()),  # Handle outliers (now by capping)
+                (
+                    "selector",
+                    FeatureSelector(),
+                ),  # Feature selection (variance, correlation)
+                (
+                    "column_transform",
+                    preprocessor_transformer,
+                ),  # Apply ColumnTransformer (impute, scale, encode)
+            ]
+        )
 
         return self.pipeline
 
@@ -334,7 +370,9 @@ class PreprocessorBuilder:
                 - pipeline (Pipeline): The fitted preprocessing pipeline object.
         """
         # Build the pipeline, passing X for type inference for ColumnTransformer
-        pipeline = self.build_pipeline(X.copy()) # Pass a copy to avoid modifying original X
+        pipeline = self.build_pipeline(
+            X.copy()
+        )  # Pass a copy to avoid modifying original X
 
         # Fit and transform the data using the built pipeline
         # With set_config(transform_output="pandas"), this should return a DataFrame.

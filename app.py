@@ -22,7 +22,9 @@ logger = get_logger("streamlit_app")
 
 st.set_page_config(page_title="Robo Data Scientist 🤖", layout="wide")
 st.title("🤖 Robo Data Scientist - AutoML App")
-st.markdown("Upload any structured dataset (CSV/Excel), and we'll train 15+ models, rank them, and let you make predictions!")
+st.markdown(
+    "Upload any structured dataset (CSV/Excel), and we'll train 15+ models, rank them, and let you make predictions!"
+)
 
 # Create runtime directories once, at the application entrypoint.
 ensure_directories()
@@ -44,11 +46,8 @@ if file:
     except ValueError:
         default_index = max(len(df.columns) - 1, 0)
 
-
     target_col = st.sidebar.selectbox(
-        "🎯 Select Target Column",
-        df.columns,
-        index=default_index
+        "🎯 Select Target Column", df.columns, index=default_index
     )
     st.sidebar.success(f"Selected target: {target_col}")
 
@@ -78,8 +77,7 @@ if file:
                 if result.best_estimator is not None:
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     model_path = (
-                        MODEL_DIR
-                        / f"model_{result.best_model_name}_{timestamp}.pkl"
+                        MODEL_DIR / f"model_{result.best_model_name}_{timestamp}.pkl"
                     )
 
                     # Persist a single, self-describing artifact so training and
@@ -128,9 +126,7 @@ if file:
         "Upload Data for Prediction", type=["csv", "xlsx"], key="pred_uploader"
     )
 
-    model_files = sorted(
-        (p.name for p in MODEL_DIR.glob("*.pkl")), reverse=True
-    )
+    model_files = sorted((p.name for p in MODEL_DIR.glob("*.pkl")), reverse=True)
     if not model_files:
         st.sidebar.info("Train a model first to enable predictions.")
     else:
@@ -158,4 +154,3 @@ if file:
                     logger.exception("Prediction failed")
 else:
     st.info("👈 Upload a dataset in the sidebar to get started.")
-

@@ -81,9 +81,7 @@ def configure_logging(force: bool = False) -> logging.Logger:
             )
             file_handler.setLevel(level)
             file_handler.setFormatter(
-                logging.Formatter(
-                    "%(asctime)s | %(levelname)s | %(name)s | %(message)s"
-                )
+                logging.Formatter("%(asctime)s | %(levelname)s | %(name)s | %(message)s")
             )
             logger.addHandler(file_handler)
         except OSError as exc:  # read-only filesystem, permissions, ...

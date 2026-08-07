@@ -1,4 +1,3 @@
-
 import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
@@ -23,9 +22,10 @@ def load_dataset(file) -> pd.DataFrame:
     else:
         raise ValueError("Unsupported file format. Only CSV and Excel are supported.")
 
+
 def detect_target_column(df: pd.DataFrame) -> str:
     """
-    Automatically selects the most likely target column by checking columns 
+    Automatically selects the most likely target column by checking columns
     with fewer unique values and suitable data types.
     """
     for col in reversed(df.columns):
@@ -33,12 +33,14 @@ def detect_target_column(df: pd.DataFrame) -> str:
             return col
     return df.columns[-1]
 
+
 def clean_currency_symbols(column: pd.Series) -> pd.Series:
     """
-    Detects and removes currency symbols, percentages, or non-numeric characters 
+    Detects and removes currency symbols, percentages, or non-numeric characters
     from numeric-looking columns.
     """
-    return column.replace(r'[^0-9.-]', '', regex=True).astype(float)
+    return column.replace(r"[^0-9.-]", "", regex=True).astype(float)
+
 
 def preprocess_target_column(y: pd.Series) -> tuple[np.ndarray, object | None]:
     """Clean and, when necessary, encode the target column.
@@ -63,7 +65,10 @@ def preprocess_target_column(y: pd.Series) -> tuple[np.ndarray, object | None]:
         encoder = LabelEncoder()
         return encoder.fit_transform(y.astype(str)), encoder
 
-def analyze_and_prepare_target(df: pd.DataFrame, target_col: str) -> tuple[pd.DataFrame, np.ndarray, object]:
+
+def analyze_and_prepare_target(
+    df: pd.DataFrame, target_col: str
+) -> tuple[pd.DataFrame, np.ndarray, object]:
     """
     Drops the target column from features, preprocesses it, and returns:
     - cleaned X (features)

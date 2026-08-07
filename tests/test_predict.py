@@ -40,9 +40,7 @@ def trained_artifact_path(classification_df, tmp_path, monkeypatch):
     return path
 
 
-def test_round_trip_train_save_predict(
-    trained_artifact_path, classification_df
-):
+def test_round_trip_train_save_predict(trained_artifact_path, classification_df):
     """The regression test for the save/load contract drift bug."""
     X = classification_df.drop(columns=["target"])
 
@@ -77,9 +75,7 @@ def test_missing_model_file_raises(classification_df, tmp_path):
 
 def test_labels_are_decoded_back_to_original_classes(tmp_path):
     """A LabelEncoder in the artifact must be applied in reverse."""
-    df = pd.DataFrame(
-        {"f": [1.0, 2.0, 3.0, 4.0] * 10, "label": ["yes", "no"] * 20}
-    )
+    df = pd.DataFrame({"f": [1.0, 2.0, 3.0, 4.0] * 10, "label": ["yes", "no"] * 20})
     from utils.data_utils import analyze_and_prepare_target
 
     X, y, encoder = analyze_and_prepare_target(df.copy(), "label")
@@ -87,9 +83,7 @@ def test_labels_are_decoded_back_to_original_classes(tmp_path):
     from utils.feature_engineer import build_preprocessor
 
     preprocessor = build_preprocessor(X).fit(X)
-    model = DummyClassifier(strategy="most_frequent").fit(
-        preprocessor.transform(X), y
-    )
+    model = DummyClassifier(strategy="most_frequent").fit(preprocessor.transform(X), y)
 
     path = tmp_path / "encoded.pkl"
     ModelArtifact(

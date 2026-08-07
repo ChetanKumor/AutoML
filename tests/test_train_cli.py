@@ -35,10 +35,14 @@ class TestArgumentParsing:
     def test_parses_all_options(self, tmp_path):
         args = train_cli.parse_args(
             [
-                "--data", "d.csv",
-                "--target", "y",
-                "--output-dir", str(tmp_path),
-                "--task-type", "regression",
+                "--data",
+                "d.csv",
+                "--target",
+                "y",
+                "--output-dir",
+                str(tmp_path),
+                "--task-type",
+                "regression",
             ]
         )
         assert str(args.data) == "d.csv"
@@ -73,9 +77,7 @@ class TestMain:
     def test_auto_detects_target_when_omitted(self, dataset, tmp_path, cheap_search):
         out_dir = tmp_path / "out"
 
-        exit_code = train_cli.main(
-            ["--data", str(dataset), "--output-dir", str(out_dir)]
-        )
+        exit_code = train_cli.main(["--data", str(dataset), "--output-dir", str(out_dir)])
 
         assert exit_code == 0
         artifact = ModelArtifact.load(str(next(out_dir.glob("model_*.pkl"))))
@@ -90,9 +92,12 @@ class TestMain:
     def test_unknown_target_exits_nonzero(self, dataset, tmp_path):
         exit_code = train_cli.main(
             [
-                "--data", str(dataset),
-                "--target", "does_not_exist",
-                "--output-dir", str(tmp_path),
+                "--data",
+                str(dataset),
+                "--target",
+                "does_not_exist",
+                "--output-dir",
+                str(tmp_path),
             ]
         )
         assert exit_code == 1
@@ -101,7 +106,5 @@ class TestMain:
         empty = tmp_path / "empty.csv"
         empty.write_text("a,b\n")
 
-        exit_code = train_cli.main(
-            ["--data", str(empty), "--output-dir", str(tmp_path)]
-        )
+        exit_code = train_cli.main(["--data", str(empty), "--output-dir", str(tmp_path)])
         assert exit_code == 1
