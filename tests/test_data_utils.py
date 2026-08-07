@@ -8,7 +8,8 @@ import pytest
 
 from utils.data_utils import (
     analyze_and_prepare_target,
-    clean_currency_symbols,
+    clean_numeric_string,
+    clean_target_column,
     detect_target_column,
     load_dataset,
 )
@@ -101,16 +102,55 @@ class TestDetectTargetColumn:
         pd.testing.assert_frame_equal(classification_df, before)
 
 
-class TestCleanCurrencySymbols:
-    def test_strips_currency_and_separators(self):
-        series = pd.Series(["$1,000", "$2,500.50"])
-        assert clean_currency_symbols(series).tolist() == [1000.0, 2500.5]
+class TestCleanNumericString:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("$1,000", 1000.0),
+            ("50%", 50.0),
+            ("₹2,500", 2500.0),
+            ("€1.5", 1.5),
+            ("£99", 99.0),
+            ("  42  ", 42.0),
+            ("-3.5", -3.5),
+            (3.5, 3.5),
+        ],
+    )
+    def test_parses_decorated_numbers(self, raw, expected):
+        assert clean_numeric_string(raw) == pytest.approx(expected)
 
-    def test_strips_percent(self):
-        assert clean_currency_symbols(pd.Series(["10%", "20%"])).tolist() == [
-            10.0,
-            20.0,
-        ]
+    def test_nan_passes_through(self):
+        assert pd.isna(clean_numeric_string(np.nan))
+
+    @pytest.mark.parametrize("raw", ["not-a-number", "1.0.0", "12abc", ""])
+    def test_unparseable_becomes_nan(self, raw):
+        assert pd.isna(clean_numeric_string(raw))
+
+
+class TestCleanTargetColumn:
+    def test_numeric_target_returns_no_encoder(self):
+        values, encoder = clean_target_column(pd.Series([1.0, 2.0, 3.0]))
+        assert encoder is None
+        assert values.tolist() == [1.0, 2.0, 3.0]
+
+    def test_categorical_target_returns_encoder(self):
+        values, encoder = clean_target_column(pd.Series(["yes", "no", "yes"]))
+        assert encoder is not None
+        assert set(np.unique(values)) == {0, 1}
+
+    def test_currency_target_is_cleaned_to_numeric(self):
+        values, encoder = clean_target_column(pd.Series(["$100", "$200"]))
+        assert encoder is None
+        assert values.tolist() == [100.0, 200.0]
+
+    def test_one_malformed_value_does_not_recategorise_the_column(self):
+        """Regression: a whole-column cast raised on a single bad cell, and the
+        fallback encoded an otherwise-numeric target as categorical."""
+        values, encoder = clean_target_column(pd.Series(["1.0.0", "2.5", "3.5"]))
+
+        assert encoder is None, "numeric target was misread as categorical"
+        assert pd.isna(values[0])
+        assert values[1] == pytest.approx(2.5)
 
 
 class TestAnalyzeAndPrepareTarget:

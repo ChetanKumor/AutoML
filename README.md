@@ -126,9 +126,14 @@ Dataset (CSV / Excel)
         │
         ▼
 ┌───────────────────────┐
+│ Validation            │  extension, size, row/column counts, target
+│ utils/validation      │  usability — rejected before any work starts
+└───────────┬───────────┘
+            ▼
+┌───────────────────────┐
 │ Target preparation    │  clean currency/percent strings, label-encode
-│ utils/data_utils      │  categorical targets, infer classification
-│ auto_target_identifier│  vs. regression
+│ utils/data_utils      │  categorical targets, then infer
+│ utils/task_inference  │  classification vs. regression
 └───────────┬───────────┘
             ▼
 ┌───────────────────────┐
@@ -215,15 +220,16 @@ AutoML/
 ├── app.py                        Streamlit UI
 ├── train.py                      CLI training entrypoint
 ├── utils/
-│   ├── auto_target_identifier.py Target detection, task-type inference
 │   ├── constants.py              Environment-driven configuration
-│   ├── data_utils.py             Dataset loading, target preparation
-│   ├── feature_engineer.py       Custom transformers, pipeline builder
 │   ├── logging_utils.py          Centralised logging
-│   ├── model_artifact.py         Serialization contract
+│   ├── validation.py             Input checks
+│   ├── data_utils.py             Loading, target detection and cleaning
+│   ├── task_inference.py         Classification vs. regression inference
+│   ├── feature_engineer.py       Custom transformers, pipeline builder
 │   ├── model_trainer.py          Model search, evaluation, leaderboard
+│   ├── model_artifact.py         Serialization contract
 │   └── predict.py                Inference
-├── tests/                        86 tests
+├── tests/                        131 tests
 ├── notebooks/                    Exploratory analysis
 ├── data/                         Sample dataset
 └── .github/workflows/ci.yml      Lint, test, smoke, app-boot
@@ -251,7 +257,7 @@ locally, in CI and in a container.
 pip install -r requirements-dev.txt
 
 pytest                       # 86 tests
-pytest --cov=utils           # with coverage (currently 82%)
+pytest --cov=utils           # with coverage (currently 88%)
 ruff check . && ruff format --check .
 ```
 

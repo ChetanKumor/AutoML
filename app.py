@@ -5,7 +5,6 @@ from datetime import datetime
 import pandas as pd
 import streamlit as st
 
-from utils.auto_target_identifier import detect_task_type
 from utils.constants import MODEL_DIR, ensure_directories
 from utils.data_utils import (
     analyze_and_prepare_target,
@@ -16,6 +15,7 @@ from utils.logging_utils import configure_logging, get_logger
 from utils.model_artifact import ModelArtifact
 from utils.model_trainer import train_models
 from utils.predict import make_prediction
+from utils.task_inference import detect_task_type
 from utils.validation import (
     DatasetValidationError,
     validate_dataframe,

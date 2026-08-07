@@ -2,7 +2,7 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
-from utils.auto_target_identifier import is_potential_target
+from utils.task_inference import is_potential_target
 
 
 def load_dataset(file) -> pd.DataFrame:
@@ -68,48 +68,93 @@ def detect_target_column(df: pd.DataFrame) -> str:
     return df.columns[-1]
 
 
-def clean_currency_symbols(column: pd.Series) -> pd.Series:
-    """
-    Detects and removes currency symbols, percentages, or non-numeric characters
-    from numeric-looking columns.
-    """
-    return column.replace(r"[^0-9.-]", "", regex=True).astype(float)
+#: Symbols stripped from numeric-looking values before parsing.
+_DECORATIONS = ("$", "%", "₹", "€", "£", ",")
 
 
-def preprocess_target_column(y: pd.Series) -> tuple[np.ndarray, object | None]:
-    """Clean and, when necessary, encode the target column.
+def clean_numeric_string(val):
+    """Parse a single decorated numeric value, or return NaN.
 
-    A numeric-looking target (including one decorated with currency or percent
-    symbols) is converted to float and needs no encoder. Anything else is
-    treated as categorical and label-encoded.
+    Handles currency symbols, percent signs and thousands separators. Values
+    that are not recognisably numeric become NaN rather than raising, so one
+    malformed cell cannot change how the whole column is interpreted.
 
     Args:
-        y: The raw target series.
+        val: A scalar of any type.
+
+    Returns:
+        A float, the original value if it was already non-string, or NaN.
+    """
+    if pd.isnull(val):
+        return np.nan
+    if not isinstance(val, str):
+        return val
+
+    cleaned = val.strip()
+    for symbol in _DECORATIONS:
+        cleaned = cleaned.replace(symbol, "")
+
+    # More than one decimal point is not a number (e.g. a version string).
+    if cleaned.count(".") > 1:
+        return np.nan
+
+    try:
+        return float(cleaned)
+    except ValueError:
+        return np.nan
+
+
+def clean_target_column(series: pd.Series) -> tuple[np.ndarray, object | None]:
+    """Clean and, when necessary, encode a target column.
+
+    A numeric-looking target -- including one decorated with currency or percent
+    symbols -- is converted to float and needs no encoder. Anything else is
+    treated as categorical and label-encoded.
+
+    Parsing is per-value and NaN-tolerant. A whole-column regex-and-cast would
+    raise on a single malformed cell, and the resulting fallback would encode an
+    otherwise-numeric target as categorical, silently turning a regression
+    problem into a classification one.
+
+    Args:
+        series: The raw target series.
 
     Returns:
         A ``(values, encoder)`` pair, where ``encoder`` is ``None`` for numeric
         targets and a fitted ``LabelEncoder`` otherwise.
     """
-    try:
-        return clean_currency_symbols(y).values, None
-    except (ValueError, TypeError, AttributeError):
-        # Not numeric-like: fall back to categorical encoding. The exception
-        # types are named explicitly so that genuine bugs (KeyboardInterrupt,
-        # MemoryError, typos raising NameError) are not silently swallowed.
-        encoder = LabelEncoder()
-        return encoder.fit_transform(y.astype(str)), encoder
+    cleaned = series.apply(clean_numeric_string)
+
+    if pd.api.types.is_numeric_dtype(cleaned) and not cleaned.isnull().all():
+        return cleaned.values, None
+
+    encoder = LabelEncoder()
+    return encoder.fit_transform(series.astype(str).fillna("__MISSING__")), encoder
+
+
+#: Backwards-compatible alias. Prefer :func:`clean_target_column`.
+preprocess_target_column = clean_target_column
 
 
 def analyze_and_prepare_target(
     df: pd.DataFrame, target_col: str
-) -> tuple[pd.DataFrame, np.ndarray, object]:
+) -> tuple[pd.DataFrame, np.ndarray, object | None]:
+    """Split a dataset into features and a cleaned target.
+
+    Args:
+        df: The loaded dataset, including the target column.
+        target_col: Name of the column to predict.
+
+    Returns:
+        A ``(X, y, encoder)`` triple: the feature frame with ``target_col``
+        removed, the cleaned target values, and the fitted ``LabelEncoder`` if
+        the target was categorical (otherwise ``None``).
+
+    Raises:
+        KeyError: If ``target_col`` is not a column of ``df``.
     """
-    Drops the target column from features, preprocesses it, and returns:
-    - cleaned X (features)
-    - cleaned y (target)
-    - encoder used (or None)
-    """
-    y_raw = df[target_col]
-    y, encoder = preprocess_target_column(y_raw)
-    df = df.drop(columns=[target_col])
-    return df, y, encoder
+    if target_col not in df.columns:
+        raise KeyError(f"Target column {target_col!r} is not in the dataset.")
+
+    y, encoder = clean_target_column(df[target_col])
+    return df.drop(columns=[target_col]), y, encoder
