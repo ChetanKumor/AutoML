@@ -1,0 +1,19 @@
+# Streamlit configuration.
+# Values here are defaults for local runs; the container overrides address,
+# port and headless mode on the command line.
+
+[server]
+# Keep uploads aligned with AUTOML_MAX_UPLOAD_MB (see utils/constants.py).
+maxUploadSize = 200
+enableXsrfProtection = true
+enableCORS = true
+
+[browser]
+gatherUsageStats = false
+
+[theme]
+base = "light"
+primaryColor = "#2E86DE"
+
+[logger]
+level = "info"

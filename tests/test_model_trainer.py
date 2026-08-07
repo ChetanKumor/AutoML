@@ -1,0 +1,348 @@
+"""Tests for the model search.
+
+The search is expensive, so most tests restrict the candidate set to a couple of
+cheap estimators via monkeypatching. Correctness of the *orchestration* -- the
+split, the leak-free fit, ranking and failure handling -- is what matters here.
+"""
+
+from __future__ import annotations
+
+import numpy as np
+import pandas as pd
+import pytest
+from sklearn.dummy import DummyClassifier, DummyRegressor
+from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
+
+from utils import model_trainer
+from utils.model_trainer import (
+    PRIMARY_METRIC,
+    evaluate_model,
+    train_models,
+)
+
+
+@pytest.fixture
+def cheap_classifiers(monkeypatch):
+    """Restrict the search to two fast classifiers."""
+    monkeypatch.setattr(
+        model_trainer,
+        "_base_models",
+        lambda task_type: {
+            "LogisticRegression": LogisticRegression(max_iter=200),
+            "Dummy": DummyClassifier(strategy="most_frequent"),
+        },
+    )
+    monkeypatch.setattr(model_trainer, "PARAM_GRIDS", {})
+
+
+@pytest.fixture
+def cheap_regressors(monkeypatch):
+    monkeypatch.setattr(
+        model_trainer,
+        "_base_models",
+        lambda task_type: {
+            "LinearRegression": LinearRegression(),
+            "Dummy": DummyRegressor(),
+        },
+    )
+    monkeypatch.setattr(model_trainer, "PARAM_GRIDS", {})
+
+
+class TestTrainModelsClassification:
+    def test_returns_ranked_leaderboard(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert not result.leaderboard.empty
+        scores = result.leaderboard["Accuracy"].dropna()
+        assert list(scores) == sorted(scores, reverse=True), "not ranked best-first"
+
+    def test_selects_best_model(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert result.best_model_name is not None
+        assert result.best_estimator is not None
+        assert result.best_pipeline is not None
+        assert result.task_type == "classification"
+
+    def test_best_pipeline_predicts_from_raw_features(
+        self, classification_df, cheap_classifiers
+    ):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+        predictions = result.best_pipeline.predict(X)
+
+        assert len(predictions) == len(X)
+
+    def test_reports_classification_metrics(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        for metric in ("Accuracy", "Precision", "Recall", "F1 Score"):
+            assert metric in result.leaderboard.columns
+
+
+class TestTrainModelsRegression:
+    def test_returns_r2_leaderboard(self, regression_df, cheap_regressors):
+        X = regression_df.drop(columns=["price"])
+        y = regression_df["price"]
+
+        result = train_models(X, y, "regression")
+
+        assert "R2 Score" in result.leaderboard.columns
+        assert result.best_model_name is not None
+        assert result.task_type == "regression"
+
+    def test_learns_a_linear_signal(self, regression_df, cheap_regressors):
+        """price is ~3*num_a + noise, so a linear model should fit it well."""
+        X = regression_df.drop(columns=["price"])
+        y = regression_df["price"]
+
+        result = train_models(X, y, "regression")
+
+        assert result.best_metrics["R2 Score"] > 0.9
+
+
+class TestCrossValidationReporting:
+    def test_cv_score_and_gap_are_reported_when_tuning(
+        self, classification_df, monkeypatch
+    ):
+        """GridSearchCV already computes these; they must reach the leaderboard."""
+        monkeypatch.setattr(
+            model_trainer,
+            "_base_models",
+            lambda task_type: {"KNN": KNeighborsClassifier()},
+        )
+        monkeypatch.setattr(
+            model_trainer, "PARAM_GRIDS", {"KNN": {"n_neighbors": [3, 5]}}
+        )
+
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        result = train_models(X, y, "classification")
+
+        row = result.leaderboard.set_index("Model").loc["KNN"]
+        assert not pd.isna(row["CV Score"])
+        assert row["CV-Test Gap"] == pytest.approx(
+            row["CV Score"] - row["Accuracy"], abs=1e-4
+        )
+        assert "n_neighbors" in row["Best Params"]
+
+    def test_untuned_model_has_no_cv_columns_populated(
+        self, classification_df, cheap_classifiers
+    ):
+        """Without a grid there is no cross-validated score to report."""
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        result = train_models(X, y, "classification")
+
+        if "CV Score" in result.leaderboard.columns:
+            assert result.leaderboard["CV Score"].isna().all()
+
+    def test_leaderboard_column_order(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        columns = list(train_models(X, y, "classification").leaderboard.columns)
+
+        assert columns[0] == "Model"
+        assert columns[1] == "Accuracy"
+        # Verbose columns are pushed to the end.
+        assert columns.index("Confusion Matrix") > columns.index("F1 Score")
+
+
+class TestClassImbalance:
+    @pytest.fixture
+    def imbalanced_df(self, rng) -> pd.DataFrame:
+        """A 95/5 split, where plain accuracy is a misleading ranking signal."""
+        n = 200
+        minority = 10
+        signal = rng.normal(size=n)
+        target = np.array([0] * (n - minority) + [1] * minority)
+        return pd.DataFrame(
+            {"num_a": signal, "num_b": rng.normal(size=n), "target": target}
+        )
+
+    def test_ranks_on_balanced_accuracy_when_imbalanced(
+        self, imbalanced_df, cheap_classifiers
+    ):
+        X = imbalanced_df.drop(columns=["target"])
+        y = imbalanced_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert result.ranking_metric == "Balanced Accuracy"
+        assert "Balanced Accuracy" in result.leaderboard.columns
+
+    def test_ranks_on_accuracy_when_balanced(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        result = train_models(X, y, "classification")
+
+        assert result.ranking_metric == "Accuracy"
+
+    def test_regression_always_ranks_on_r2(self, regression_df, cheap_regressors):
+        X = regression_df.drop(columns=["price"])
+        y = regression_df["price"]
+
+        assert train_models(X, y, "regression").ranking_metric == "R2 Score"
+
+    def test_majority_class_predictor_scores_half(self, imbalanced_df, monkeypatch):
+        """Balanced accuracy must expose a degenerate majority-class model."""
+        monkeypatch.setattr(
+            model_trainer,
+            "_base_models",
+            lambda task_type: {"Dummy": DummyClassifier(strategy="most_frequent")},
+        )
+        monkeypatch.setattr(model_trainer, "PARAM_GRIDS", {})
+
+        X = imbalanced_df.drop(columns=["target"])
+        y = imbalanced_df["target"]
+        result = train_models(X, y, "classification")
+
+        row = result.leaderboard.set_index("Model").loc["Dummy"]
+        assert row["Accuracy"] > 0.9, "accuracy looks good on skewed data"
+        assert row["Balanced Accuracy"] == pytest.approx(0.5, abs=0.01)
+
+    def test_balance_ratio(self):
+        assert model_trainer._class_balance_ratio(
+            pd.Series([0, 0, 1, 1])
+        ) == pytest.approx(1.0)
+        assert model_trainer._class_balance_ratio(
+            pd.Series([0] * 90 + [1] * 10)
+        ) == pytest.approx(10 / 90)
+
+    def test_macro_f1_is_reported(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        assert "F1 Macro" in train_models(X, y, "classification").leaderboard.columns
+
+
+class TestLeakFreeTraining:
+    def test_preprocessor_is_fitted_on_the_training_fold_only(
+        self, classification_df, cheap_classifiers, monkeypatch
+    ):
+        """The preprocessor must never see all the rows it is evaluated on."""
+        seen_row_counts = []
+        original = model_trainer.build_preprocessor
+
+        def spy(X):
+            pipeline = original(X)
+            # The trainer fits via fit_transform; wrap both entry points so the
+            # assertion cannot be silently bypassed by a future refactor.
+            for method_name in ("fit", "fit_transform"):
+                real_method = getattr(pipeline, method_name)
+
+                def recording(X_fit, *args, _real=real_method, **kwargs):
+                    seen_row_counts.append(len(X_fit))
+                    return _real(X_fit, *args, **kwargs)
+
+                setattr(pipeline, method_name, recording)
+            return pipeline
+
+        monkeypatch.setattr(model_trainer, "build_preprocessor", spy)
+
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        train_models(X, y, "classification")
+
+        assert seen_row_counts, "preprocessor was never fitted"
+        # 80/20 split: the fit must see strictly fewer rows than the dataset.
+        assert all(count < len(X) for count in seen_row_counts)
+
+
+class TestFailureHandling:
+    def test_failing_model_is_recorded_not_raised(self, classification_df, monkeypatch):
+        class Exploding:
+            def fit(self, X, y):
+                raise RuntimeError("boom")
+
+            def get_params(self, deep=True):
+                return {}
+
+        monkeypatch.setattr(
+            model_trainer,
+            "_base_models",
+            lambda task_type: {
+                "Good": DummyClassifier(strategy="most_frequent"),
+                "Exploding": Exploding(),
+            },
+        )
+        monkeypatch.setattr(model_trainer, "PARAM_GRIDS", {})
+
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        result = train_models(X, y, "classification")
+
+        rows = result.leaderboard.set_index("Model")
+        assert "boom" in str(rows.loc["Exploding", "Error"])
+        # A single failure must not prevent a winner from being chosen.
+        assert result.best_model_name == "Good"
+
+    def test_unsupported_task_type_rejected(self, classification_df):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+
+        with pytest.raises(ValueError, match="Unsupported task type"):
+            train_models(X, y, "clustering")
+
+
+class TestEvaluateModel:
+    def test_classification_metrics(self, classification_df):
+        X = classification_df.drop(columns=["target"]).select_dtypes("number")
+        y = classification_df["target"]
+        model = DummyClassifier(strategy="most_frequent").fit(X, y)
+
+        metrics = evaluate_model(model, X, y, "classification")
+
+        assert set(metrics) == {
+            "Accuracy",
+            "Balanced Accuracy",
+            "Precision",
+            "Recall",
+            "F1 Score",
+            "F1 Macro",
+            "Confusion Matrix",
+        }
+        assert 0.0 <= metrics["Accuracy"] <= 1.0
+        assert 0.0 <= metrics["Balanced Accuracy"] <= 1.0
+
+    def test_regression_metrics(self, regression_df):
+        X = regression_df.drop(columns=["price"]).select_dtypes("number")
+        y = regression_df["price"]
+        model = LinearRegression().fit(X, y)
+
+        metrics = evaluate_model(model, X, y, "regression")
+
+        assert set(metrics) == {
+            "R2 Score",
+            "Mean Squared Error",
+            "Root Mean Squared Error",
+            "Mean Absolute Error",
+        }
+        assert metrics["Root Mean Squared Error"] == pytest.approx(
+            np.sqrt(metrics["Mean Squared Error"])
+        )
+
+    def test_unsupported_task_type(self, classification_df):
+        X = classification_df.drop(columns=["target"]).select_dtypes("number")
+        y = classification_df["target"]
+        model = DummyClassifier().fit(X, y)
+
+        with pytest.raises(ValueError, match="Unsupported task type"):
+            evaluate_model(model, X, y, "ranking")
+
+
+def test_primary_metric_mapping():
+    assert PRIMARY_METRIC["classification"] == "Accuracy"
+    assert PRIMARY_METRIC["regression"] == "R2 Score"
