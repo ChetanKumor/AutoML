@@ -55,9 +55,45 @@ class TestDetectTargetColumn:
     def test_prefers_low_cardinality_trailing_column(self, classification_df):
         assert detect_target_column(classification_df) == "target"
 
+    def test_finds_string_label_column(self):
+        """Regression test: pandas 3 types text columns as `str`, and a dtype
+        allowlist of [object, int, float, bool] silently skipped them."""
+        df = pd.DataFrame(
+            {
+                "f1": [1.0, 2.0, 3.0, 4.0] * 5,
+                "f2": [5.0, 6.0, 7.0, 8.0] * 5,
+                "label": ["yes", "no"] * 10,
+            }
+        )
+        assert detect_target_column(df) == "label"
+
+    @pytest.mark.parametrize("name", ["target", "label", "class", "outcome", "y"])
+    def test_prefers_conventionally_named_column(self, name):
+        df = pd.DataFrame({"a": range(20), name: [0, 1] * 10, "b": range(20)})
+        assert detect_target_column(df) == name
+
+    def test_skips_identifier_column(self):
+        df = pd.DataFrame(
+            {"id": range(20), "f": [1.0, 2.0] * 10, "class": ["p", "q"] * 10}
+        )
+        assert detect_target_column(df) == "class"
+
+    def test_skips_constant_column(self):
+        df = pd.DataFrame(
+            {"f": [1.0, 2.0] * 10, "label": ["a", "b"] * 10, "constant": [7] * 20}
+        )
+        assert detect_target_column(df) == "label"
+
     def test_falls_back_to_last_column(self):
         df = pd.DataFrame({"a": range(100), "b": range(100, 200)})
-        assert detect_target_column(df) in df.columns
+        assert detect_target_column(df) == "b"
+
+    def test_always_returns_a_real_column(self, classification_df):
+        assert detect_target_column(classification_df) in classification_df.columns
+
+    def test_empty_dataset_raises(self):
+        with pytest.raises(ValueError, match="empty dataset"):
+            detect_target_column(pd.DataFrame())
 
     def test_does_not_mutate_input(self, classification_df):
         before = classification_df.copy()

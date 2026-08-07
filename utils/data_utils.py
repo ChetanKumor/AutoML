@@ -2,6 +2,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import LabelEncoder
 
+from utils.auto_target_identifier import is_potential_target
+
 
 def load_dataset(file) -> pd.DataFrame:
     """
@@ -23,14 +25,46 @@ def load_dataset(file) -> pd.DataFrame:
         raise ValueError("Unsupported file format. Only CSV and Excel are supported.")
 
 
+#: Column names that conventionally denote a prediction target.
+TARGET_NAME_HINTS = frozenset(
+    {"target", "label", "class", "y", "outcome", "output", "result"}
+)
+#: Above this many distinct values a column looks like an identifier or a
+#: free-text field rather than a label.
+MAX_TARGET_CARDINALITY = 20
+
+
 def detect_target_column(df: pd.DataFrame) -> str:
+    """Guess which column is the prediction target.
+
+    Prefers a conventionally-named column, then the right-most plausible label
+    column (datasets overwhelmingly put the target last), and finally falls back
+    to the last column.
+
+    Args:
+        df: The loaded dataset.
+
+    Returns:
+        The name of the chosen column. Always a real column of ``df``.
     """
-    Automatically selects the most likely target column by checking columns
-    with fewer unique values and suitable data types.
-    """
-    for col in reversed(df.columns):
-        if df[col].nunique() < 20 and df[col].dtype in [object, int, float, bool]:
+    if df.empty or df.shape[1] == 0:
+        raise ValueError("Cannot detect a target column in an empty dataset.")
+
+    # 1. An explicitly named target wins, if it is actually usable.
+    for col in df.columns:
+        if str(col).strip().lower() in TARGET_NAME_HINTS and is_potential_target(df[col]):
             return col
+
+    # 2. Otherwise take the right-most low-cardinality, usable column. Testing
+    #    is_potential_target rather than an allowlist of dtype objects matters:
+    #    pandas 3 types text columns as `str`, so a check like
+    #    `dtype in [object, int, float, bool]` skips every string label and
+    #    silently selects the wrong column.
+    for col in reversed(df.columns):
+        if is_potential_target(df[col]) and df[col].nunique() <= MAX_TARGET_CARDINALITY:
+            return col
+
+    # 3. Nothing looked like a label; fall back to the conventional position.
     return df.columns[-1]
 
 
