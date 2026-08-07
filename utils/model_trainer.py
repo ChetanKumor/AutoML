@@ -293,22 +293,40 @@ def train_models(
     for name, model in _base_models(task_type).items():
         params = PARAM_GRIDS.get(name, {})
         try:
+            cv_score: float | None = None
+            chosen_params: dict[str, Any] = {}
             if params:
                 search = GridSearchCV(
                     model, params, cv=cv, scoring=scoring, n_jobs=-1, error_score="raise"
                 )
                 search.fit(X_train, y_train)
                 trained = search.best_estimator_
+                # GridSearchCV already computed these; surfacing them costs
+                # nothing and makes the train/test gap visible.
+                cv_score = float(search.best_score_)
+                chosen_params = search.best_params_
             else:
                 trained = model.fit(X_train, y_train)
 
             metrics = evaluate_model(trained, X_test, y_test, task_type)
             score = metrics[primary_metric]
+            if cv_score is not None:
+                metrics["CV Score"] = cv_score
+                # A large positive gap means the model fit the training folds
+                # better than it generalises.
+                metrics["CV-Test Gap"] = cv_score - score
+            metrics["Best Params"] = chosen_params
             results[name] = {"Model": trained, "Details": metrics}
 
             if score > best_score:
                 best_score, best_model_name, best_estimator = score, name, trained
-            logger.info("  %s -> %s: %.4f", name, primary_metric, score)
+            logger.info(
+                "  %s -> %s: %.4f%s",
+                name,
+                primary_metric,
+                score,
+                f" (cv {cv_score:.4f})" if cv_score is not None else "",
+            )
         except Exception as exc:
             logger.error("  Skipping %s: %s", name, exc, exc_info=True)
             results[name] = {"Model": None, "Details": {"Error": str(exc)}}
@@ -388,6 +406,11 @@ def _build_classification_ensembles(results: dict[str, dict]) -> dict[str, Any]:
     return ensembles
 
 
+#: Columns pushed to the right of the leaderboard: verbose, and read after the
+#: headline metrics rather than alongside them.
+_TRAILING_COLUMNS = ("Confusion Matrix", "Best Params", "Error")
+
+
 def _build_leaderboard(results: dict[str, dict], primary_metric: str) -> pd.DataFrame:
     """Flatten per-model metrics into a leaderboard sorted best-first."""
     rows = []
@@ -395,8 +418,10 @@ def _build_leaderboard(results: dict[str, dict], primary_metric: str) -> pd.Data
         details = payload.get("Details", {})
         row: dict[str, Any] = {"Model": name}
         for key, value in details.items():
-            if key == "Confusion Matrix":
-                row[key] = str(value)
+            if key in ("Confusion Matrix", "Best Params"):
+                # Render structured values as text so the column stays a single
+                # scalar dtype and displays cleanly in Streamlit and CSV.
+                row[key] = str(value) if value else ""
             elif isinstance(value, (int, float, np.floating)):
                 row[key] = round(float(value), 4)
             else:
@@ -405,9 +430,17 @@ def _build_leaderboard(results: dict[str, dict], primary_metric: str) -> pd.Data
         rows.append(row)
 
     leaderboard = pd.DataFrame(rows)
-    if not leaderboard.empty and primary_metric in leaderboard.columns:
+    if leaderboard.empty:
+        return leaderboard
+
+    if primary_metric in leaderboard.columns:
         # Higher is better for both Accuracy and R2; failures (NaN) sink last.
         leaderboard = leaderboard.sort_values(
             by=primary_metric, ascending=False, na_position="last"
         ).reset_index(drop=True)
-    return leaderboard
+
+    # Put Model and the ranking metric first, verbose columns last.
+    leading = [c for c in ("Model", primary_metric) if c in leaderboard.columns]
+    trailing = [c for c in _TRAILING_COLUMNS if c in leaderboard.columns]
+    middle = [c for c in leaderboard.columns if c not in leading + trailing]
+    return leaderboard[leading + middle + trailing]

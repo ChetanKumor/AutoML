@@ -195,6 +195,12 @@ installed, it is skipped with a warning instead of breaking the run.
 
 All figures are computed on the held-out test fold, never on training data.
 
+For every tuned model the leaderboard also carries the cross-validated score
+from the hyperparameter search, the selected hyperparameters, and the
+**CV−Test gap**. The gap is the cheapest overfitting signal available: a model
+that scores well across the training folds but drops on the held-out fold has
+a large positive gap, and is worth distrusting even if it ranks highly.
+
 ## Project structure
 
 ```

@@ -8,9 +8,11 @@ split, the leak-free fit, ranking and failure handling -- is what matters here.
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 from sklearn.dummy import DummyClassifier, DummyRegressor
 from sklearn.linear_model import LinearRegression, LogisticRegression
+from sklearn.neighbors import KNeighborsClassifier
 
 from utils import model_trainer
 from utils.model_trainer import (
@@ -109,6 +111,53 @@ class TestTrainModelsRegression:
         result = train_models(X, y, "regression")
 
         assert result.best_metrics["R2 Score"] > 0.9
+
+
+class TestCrossValidationReporting:
+    def test_cv_score_and_gap_are_reported_when_tuning(
+        self, classification_df, monkeypatch
+    ):
+        """GridSearchCV already computes these; they must reach the leaderboard."""
+        monkeypatch.setattr(
+            model_trainer,
+            "_base_models",
+            lambda task_type: {"KNN": KNeighborsClassifier()},
+        )
+        monkeypatch.setattr(
+            model_trainer, "PARAM_GRIDS", {"KNN": {"n_neighbors": [3, 5]}}
+        )
+
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        result = train_models(X, y, "classification")
+
+        row = result.leaderboard.set_index("Model").loc["KNN"]
+        assert not pd.isna(row["CV Score"])
+        assert row["CV-Test Gap"] == pytest.approx(
+            row["CV Score"] - row["Accuracy"], abs=1e-4
+        )
+        assert "n_neighbors" in row["Best Params"]
+
+    def test_untuned_model_has_no_cv_columns_populated(
+        self, classification_df, cheap_classifiers
+    ):
+        """Without a grid there is no cross-validated score to report."""
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        result = train_models(X, y, "classification")
+
+        if "CV Score" in result.leaderboard.columns:
+            assert result.leaderboard["CV Score"].isna().all()
+
+    def test_leaderboard_column_order(self, classification_df, cheap_classifiers):
+        X = classification_df.drop(columns=["target"])
+        y = classification_df["target"]
+        columns = list(train_models(X, y, "classification").leaderboard.columns)
+
+        assert columns[0] == "Model"
+        assert columns[1] == "Accuracy"
+        # Verbose columns are pushed to the end.
+        assert columns.index("Confusion Matrix") > columns.index("F1 Score")
 
 
 class TestLeakFreeTraining:
