@@ -70,59 +70,61 @@ def is_potential_target(series: pd.Series) -> bool:
     return True
 
 
-def detect_task_type(y_processed: pd.Series) -> str:
-    """
-    Detects if the task is classification or regression based on the PROCESSED target series.
-    This function expects a series that has already gone through clean_target_column.
+#: A numeric target with more distinct values than this is treated as continuous.
+MAX_CLASSES = 15
+#: Encoded class labels are normally small integers; values above this magnitude
+#: look like measurements (prices, counts) rather than category codes.
+MAX_LABEL_MAGNITUDE = 1000
+#: ...unless the values repeat often enough to behave like labels regardless.
+MAX_UNIQUE_RATIO = 0.05
 
-    A task is considered classification if:
-    1. Its dtype is object, category, or bool (meaning it was string-like and encoded).
-    2. It's numeric, but has a very small, discrete set of unique, integer-like values
-       AND a limited range of values. This is a strict check to avoid misclassifying
-       continuous numerical targets (like prices) as classification.
+
+def detect_task_type(y_processed: pd.Series) -> str:
+    """Infer whether a prepared target implies classification or regression.
+
+    Expects a series that has already been through :func:`clean_target_column`.
+
+    A target is classification when it is non-numeric, or when it is numeric but
+    behaves like a set of discrete codes: few distinct values, all integral, and
+    either small in magnitude or repeating often enough to be labels. Everything
+    else -- notably continuous quantities such as prices -- is regression.
+
+    Args:
+        y_processed: The cleaned target series.
+
+    Returns:
+        ``"classification"`` or ``"regression"``.
     """
-    # If the processed series is categorical/boolean, it's definitely classification
-    if y_processed.dtype in ['object', 'category', 'bool']:
+    # Anything non-numeric (str, object, category, bool) is categorical, hence
+    # classification. Testing numeric-ness rather than enumerating dtype names
+    # is essential: pandas 3 gives string columns the `str` dtype, so an
+    # ['object', 'category', 'bool'] allowlist silently misses text labels and
+    # falls through to regression.
+    if not pd.api.types.is_numeric_dtype(y_processed) or pd.api.types.is_bool_dtype(
+        y_processed
+    ):
         return 'classification'
 
-    # If it's numerical, apply stricter checks
-    if pd.api.types.is_numeric_dtype(y_processed):
-        unique_non_nan = y_processed.dropna().unique()
-        num_unique = len(unique_non_nan)
+    values = y_processed.dropna()
+    unique_values = values.unique()
+    num_unique = len(unique_values)
 
-        # Calculate the range of unique numerical values
-        # Handle cases where unique_non_nan might be empty or single value
-        data_range = 0
-        if num_unique > 1:
-            data_range = unique_non_nan.max() - unique_non_nan.min()
-
-        # Heuristic for numeric classification:
-        # 1. Very few unique values (e.g., 2 for binary, up to ~10-15 for multi-class)
-        # 2. ALL unique values must be integer-like (e.g., 0.0, 1.0, 2.0, but not 1.5)
-        # 3. The range of these values must not be excessively large (e.g., prices vs. categories 0,1,2)
-
-        # STRICT_NUMERIC_CLASSIFICATION_THRESHOLD: Max unique integer-like values for classification
-        STRICT_NUMERIC_CLASSIFICATION_THRESHOLD = 15 # Can be adjusted based on typical classification class counts
-
-        # ARBITRARY_MAX_CLASSIFICATION_VALUE: If the max value is too high, it's likely not classification
-        # (e.g., a "class" value of 1000000 is usually a continuous variable)
-        ARBITRARY_MAX_CLASSIFICATION_VALUE = 1000 # Example: if values are 0, 1, 2, 500, it might be OK.
-                                                # If values are 10000, 20000, 30000, less likely classification.
-                                                # This is a strong heuristic for 'price' data.
-
-        # Combined condition:
-        # - Has few unique values (and not empty)
-        # - All unique values are integer-like
-        # - Max value is within a reasonable range for discrete categories
-        if (num_unique > 0 and num_unique <= STRICT_NUMERIC_CLASSIFICATION_THRESHOLD and
-            np.all(np.mod(unique_non_nan, 1) == 0) and
-            (unique_non_nan.max() <= ARBITRARY_MAX_CLASSIFICATION_VALUE or num_unique <= 5)): # Allow 5 classes regardless of max value (e.g. 100,200,300,400,500)
-            return 'classification'
-        
-        # If it's numeric but doesn't meet the strict classification criteria, it's regression.
+    if num_unique == 0 or num_unique > MAX_CLASSES:
         return 'regression'
 
-    # Default to regression if type is unexpected or not clearly classification
+    # Fractional values (1.5, 2.7, ...) are never class codes.
+    if not np.all(np.mod(unique_values, 1) == 0):
+        return 'regression'
+
+    # Small integers look like labels. Large ones only do so when they repeat
+    # often, which distinguishes {100000, 200000} used as codes from a handful
+    # of distinct house prices.
+    unique_ratio = num_unique / len(values)
+    if np.max(np.abs(unique_values)) <= MAX_LABEL_MAGNITUDE:
+        return 'classification'
+    if unique_ratio <= MAX_UNIQUE_RATIO:
+        return 'classification'
+
     return 'regression'
 
 

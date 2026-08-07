@@ -1,0 +1,60 @@
+[project]
+name = "robo-data-scientist"
+version = "0.1.0"
+description = "An AutoML platform that profiles a tabular dataset, trains and ranks a family of models, and serves predictions from the winner."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Chetan Kumor" }]
+keywords = ["automl", "machine-learning", "scikit-learn", "streamlit", "mlops"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "License :: OSI Approved :: MIT License",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Repository = "https://github.com/ChetanKumor/AutoML"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-q --strict-markers --strict-config"
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::FutureWarning",
+]
+
+[tool.ruff]
+line-length = 90
+target-version = "py310"
+exclude = ["notebooks", ".venv", "venv"]
+
+[tool.ruff.lint]
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "I",    # import sorting
+    "UP",   # pyupgrade
+    "B",    # bugbear
+    "C4",   # comprehensions
+    "SIM",  # simplify
+]
+ignore = [
+    "E501",  # line length is handled by the formatter
+    "B008",  # function call in default argument (argparse/Path idioms)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["B011"]
+
+[tool.coverage.run]
+source = ["utils"]
+omit = ["*/__pycache__/*", "tests/*"]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+]

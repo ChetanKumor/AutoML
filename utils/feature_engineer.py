@@ -268,36 +268,22 @@ class PreprocessorBuilder:
     def __init__(self):
         self.pipeline = None # Stores the complete preprocessing pipeline
 
-    def build_pipeline(self, X_raw_for_inference: pd.DataFrame):
-        """
-        Builds the scikit-learn pipeline based on the input data's column types.
-        This method is called during fit to define the pipeline structure.
+    def build_pipeline(self, X_raw_for_inference: pd.DataFrame = None):
+        """Build the (unfitted) preprocessing pipeline.
+
+        Column routing is resolved *dynamically* by dtype at fit time via
+        :func:`~sklearn.compose.make_column_selector`. Static column lists
+        cannot be used here: the ColumnTransformer runs after ``FeatureSelector``
+        has dropped low-variance and highly-correlated columns, so a list
+        captured from the raw frame would reference columns that no longer
+        exist and raise at fit time.
 
         Args:
-            X_raw_for_inference (pd.DataFrame): A DataFrame used to infer column types
-                                                for setting up the ColumnTransformer.
-                                                This is typically the raw feature DataFrame.
+            X_raw_for_inference: Unused; retained for backwards compatibility.
+
         Returns:
-            Pipeline: The scikit-learn Pipeline object.
+            Pipeline: The unfitted scikit-learn Pipeline.
         """
-        # Step 1: Infer column types AFTER FeatureTypeCleaner and RareCategoryGrouper
-        # Create a temporary pipeline for type inference for ColumnTransformer
-        # This temporary pipeline ensures that num_cols and cat_cols are based
-        # on the data types after the initial cleaning and grouping steps.
-        initial_processing_temp_pipeline = Pipeline([
-            ("cleaner_temp", FeatureTypeCleaner()),
-            ("rare_grouper_temp", RareCategoryGrouper()),
-            # OutlierRemover is part of the main pipeline, but for initial column type inference,
-            # we consider the columns as they are after cleaner and rare_grouper.
-        ])
-        # Apply fit_transform to a copy of the raw data to get column types for ColumnTransformer setup
-        X_temp_processed = initial_processing_temp_pipeline.fit_transform(X_raw_for_inference.copy())
-
-        # Determine numeric and categorical columns based on the temporary processed data
-        num_cols = X_temp_processed.select_dtypes(include=['int64', 'float64']).columns.tolist()
-        cat_cols = X_temp_processed.select_dtypes(include=['object', 'category', 'bool']).columns.tolist()
-
-        # Define pipelines for numeric and categorical features
         num_pipeline = Pipeline([
             ("imputer", SimpleImputer(strategy="mean")),
             ("skew_correct", SkewnessCorrector()), # Apply skewness correction
@@ -309,13 +295,13 @@ class PreprocessorBuilder:
             ("encoder", OneHotEncoder(handle_unknown="ignore", sparse_output=False)) # One-hot encode
         ])
 
-        # Create a ColumnTransformer to apply different transformations to different column types
+        # The two selectors partition every column, so `remainder` never fires.
         preprocessor_transformer = ColumnTransformer(
             [
-                ("num", num_pipeline, num_cols), # Apply numeric pipeline to numeric columns
-                ("cat", cat_pipeline, cat_cols)  # Apply categorical pipeline to categorical columns
+                ("num", num_pipeline, selector(dtype_include=np.number)),
+                ("cat", cat_pipeline, selector(dtype_exclude=np.number)),
             ],
-            remainder='passthrough' # Keep other columns (e.g., IDs) as they are
+            remainder="drop",
         )
 
         # Define the complete preprocessing pipeline
